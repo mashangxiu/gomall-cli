@@ -90,6 +90,7 @@ func newRootCmd() (*cobra.Command, error) {
 	rootCmd.AddCommand(newHelloCmd())
 	rootCmd.AddCommand(newCompletionCmd(rootCmd))
 	rootCmd.AddCommand(newAuthCmd())
+	rootCmd.AddCommand(newModelCmd())
 
 	return rootCmd, nil
 }

@@ -30,6 +30,17 @@ printf '%s\n' "$GOMALL_PASSWORD" | go run . auth login -u <email> --password-std
 
 go run . auth status
 go run . auth logout
+
+# model search (requires login first)
+go run . model search --name qwen
+
+# my created models (requires login first)
+go run . model created
+go run . model created --name qwen
+
+# model detail by author/name (requires login first)
+go run . model detail gomall/test1
+go run . model detail gomall/test1 --show-readme
 ```
 
 After login, `token / expireTime / username` are stored in a local session file.
