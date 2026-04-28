@@ -6,6 +6,7 @@ import (
 	"os"
 	pathpkg "path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -147,25 +148,34 @@ func newModelCloneCmd() *cobra.Command {
 	var dir string
 
 	cmd := &cobra.Command{
-		Use:   "clone 作者/名称",
+		Use:   "clone 作者/名称|ID",
 		Short: "Clone model repository to local directory",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			author, name, err := splitModelRef(args[0])
-			if err != nil {
-				return clierr.New(clierr.CodeInvalidInput, "参数错误："+err.Error())
-			}
-
 			ctx, err := app.FromContext(cmd.Context())
 			if err != nil {
 				return err
 			}
 
 			svc := model.NewService(ctx.APIClient)
-			detail, err := svc.Detail(cmd.Context(), author, name)
-			if err != nil {
-				ctx.Logger.Error("model detail failed before clone", "error", err, "author", author, "name", name)
-				return clierr.New(clierr.CodeRuntime, "获取模型详情失败："+err.Error())
+			input := strings.TrimSpace(args[0])
+			var detail model.ModelDetail
+			if id, ok := tryParsePositiveInt64(input); ok {
+				detail, err = svc.DetailByID(cmd.Context(), id)
+				if err != nil {
+					ctx.Logger.Error("model detail by id failed before clone", "error", err, "id", id)
+					return clierr.New(clierr.CodeRuntime, "获取模型详情失败："+err.Error())
+				}
+			} else {
+				author, name, parseErr := splitModelRef(input)
+				if parseErr != nil {
+					return clierr.New(clierr.CodeInvalidInput, "参数错误："+parseErr.Error())
+				}
+				detail, err = svc.Detail(cmd.Context(), author, name)
+				if err != nil {
+					ctx.Logger.Error("model detail failed before clone", "error", err, "author", author, "name", name)
+					return clierr.New(clierr.CodeRuntime, "获取模型详情失败："+err.Error())
+				}
 			}
 			repoURL := strings.TrimSpace(detail.LabAddress)
 			if repoURL == "" {
@@ -224,25 +234,34 @@ func newModelDetailCmd() *cobra.Command {
 	var showReadme bool
 
 	cmd := &cobra.Command{
-		Use:   "detail 作者/名称",
-		Short: "Get model detail by author/name",
+		Use:   "detail 作者/名称|ID",
+		Short: "Get model detail by author/name or numeric ID",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			author, name, err := splitModelRef(args[0])
-			if err != nil {
-				return clierr.New(clierr.CodeInvalidInput, "参数错误："+err.Error())
-			}
-
 			ctx, err := app.FromContext(cmd.Context())
 			if err != nil {
 				return err
 			}
 
 			svc := model.NewService(ctx.APIClient)
-			detail, err := svc.Detail(cmd.Context(), author, name)
-			if err != nil {
-				ctx.Logger.Error("model detail failed", "error", err, "author", author, "name", name)
-				return clierr.New(clierr.CodeRuntime, "查询模型详情失败："+err.Error())
+			input := strings.TrimSpace(args[0])
+			var detail model.ModelDetail
+			if id, ok := tryParsePositiveInt64(input); ok {
+				detail, err = svc.DetailByID(cmd.Context(), id)
+				if err != nil {
+					ctx.Logger.Error("model detail by id failed", "error", err, "id", id)
+					return clierr.New(clierr.CodeRuntime, "查询模型详情失败："+err.Error())
+				}
+			} else {
+				author, name, parseErr := splitModelRef(input)
+				if parseErr != nil {
+					return clierr.New(clierr.CodeInvalidInput, "参数错误："+parseErr.Error())
+				}
+				detail, err = svc.Detail(cmd.Context(), author, name)
+				if err != nil {
+					ctx.Logger.Error("model detail failed", "error", err, "author", author, "name", name)
+					return clierr.New(clierr.CodeRuntime, "查询模型详情失败："+err.Error())
+				}
 			}
 
 			fmt.Println("查询成功")
@@ -325,4 +344,21 @@ func deriveRepoDirName(repoURL, fallback string) string {
 	}
 	fallback = strings.TrimSpace(fallback)
 	return strings.TrimSuffix(fallback, ".git")
+}
+
+func tryParsePositiveInt64(raw string) (int64, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, false
+	}
+	for _, ch := range raw {
+		if ch < '0' || ch > '9' {
+			return 0, false
+		}
+	}
+	id, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || id <= 0 {
+		return 0, false
+	}
+	return id, true
 }

@@ -58,3 +58,13 @@ func TestBuildDetailPath(t *testing.T) {
 		t.Fatalf("buildDetailPath() = %q, want %q", got, want)
 	}
 }
+
+func TestBuildDetailByIDPath(t *testing.T) {
+	t.Parallel()
+
+	got := buildDetailByIDPath(1700)
+	want := "/goMallApi/api/v2/models/detail/1700"
+	if got != want {
+		t.Fatalf("buildDetailByIDPath() = %q, want %q", got, want)
+	}
+}

@@ -116,6 +116,27 @@ func (s *Service) Detail(ctx context.Context, author, name string) (ModelDetail,
 	return detail, nil
 }
 
+func (s *Service) DetailByID(ctx context.Context, id int64) (ModelDetail, error) {
+	if id <= 0 {
+		return ModelDetail{}, fmt.Errorf("id must be greater than 0")
+	}
+
+	path := buildDetailByIDPath(id)
+	env, err := s.client.Do(ctx, http.MethodGet, path, nil, true)
+	if err != nil {
+		return ModelDetail{}, err
+	}
+	if env.Code != 200 {
+		return ModelDetail{}, fmt.Errorf("model detail failed: code=%d message=%s", env.Code, env.Message)
+	}
+
+	var detail ModelDetail
+	if err := env.DecodeData(&detail); err != nil {
+		return ModelDetail{}, err
+	}
+	return detail, nil
+}
+
 func buildSearchPath(name string, page, size int) string {
 	q := url.Values{}
 	q.Set("size", strconv.Itoa(size))
@@ -142,6 +163,10 @@ func buildCreatedPath(name string, page, size int) string {
 
 func buildDetailPath(author, name string) string {
 	return detailPathPrefix + "/" + url.PathEscape(author) + "/" + url.PathEscape(name)
+}
+
+func buildDetailByIDPath(id int64) string {
+	return detailPathPrefix + "/" + strconv.FormatInt(id, 10)
 }
 
 func decodeSearchResult(env gomallapi.Envelope) (SearchResult, error) {

@@ -51,3 +51,31 @@ func TestResolveCloneTarget(t *testing.T) {
 		t.Fatalf("resolveCloneTarget() = %q", target)
 	}
 }
+
+func TestTryParsePositiveInt64(t *testing.T) {
+	t.Parallel()
+
+	id, ok := tryParsePositiveInt64("1700")
+	if !ok || id != 1700 {
+		t.Fatalf("tryParsePositiveInt64() = (%d, %t), want (1700, true)", id, ok)
+	}
+}
+
+func TestTryParsePositiveInt64Invalid(t *testing.T) {
+	t.Parallel()
+
+	cases := []string{"", "  ", "gomall/test1", "abc", "-1", "0", "1a"}
+	for _, c := range cases {
+		if _, ok := tryParsePositiveInt64(c); ok {
+			t.Fatalf("tryParsePositiveInt64(%q) should be invalid", c)
+		}
+	}
+}
+
+func TestCloneAcceptsIDInput(t *testing.T) {
+	t.Parallel()
+
+	if id, ok := tryParsePositiveInt64("1700"); !ok || id != 1700 {
+		t.Fatalf("clone input id parse failed: (%d, %t)", id, ok)
+	}
+}
