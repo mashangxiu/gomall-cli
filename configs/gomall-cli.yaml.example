@@ -1,0 +1,12 @@
+env: dev
+log-level: info
+log-format: text
+
+api-base-url: http://gomall.ac.cn
+api-timeout: 10s
+api-insecure: false
+api-user-agent: gomall-cli/0.1.0
+
+auth-login-path: /api/auth/login
+auth-token-header: token
+auth-session-file: ""
