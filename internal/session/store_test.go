@@ -17,9 +17,11 @@ func TestStoreSaveLoadClear(t *testing.T) {
 	}
 
 	in := Session{
-		Token:      "abc-sensitive-token",
-		ExpireTime: time.Now().Add(time.Hour).UnixMilli(),
-		Username:   "gomall",
+		Token:       "abc-sensitive-token",
+		ExpireTime:  time.Now().Add(time.Hour).UnixMilli(),
+		Username:    "gomall",
+		GitlabToken: "glpat-test-token",
+		GitlabID:    93,
 	}
 	if err := store.Save(in); err != nil {
 		t.Fatalf("Save() error = %v", err)
@@ -37,7 +39,7 @@ func TestStoreSaveLoadClear(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if out.Token != in.Token || out.Username != in.Username || out.ExpireTime != in.ExpireTime {
+	if out.Token != in.Token || out.Username != in.Username || out.ExpireTime != in.ExpireTime || out.GitlabToken != in.GitlabToken || out.GitlabID != in.GitlabID {
 		t.Fatalf("Load() = %+v, want %+v", out, in)
 	}
 	if out.SavedAt == 0 {

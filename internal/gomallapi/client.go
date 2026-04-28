@@ -50,6 +50,29 @@ func NewClient(cfg config.Config, tokenProvider TokenProvider) (*Client, error) 
 }
 
 func (c *Client) Do(ctx context.Context, method, apiPath string, reqBody any, requireAuth bool) (Envelope, error) {
+	if requireAuth {
+		if c.tokenProvider == nil {
+			return Envelope{}, fmt.Errorf("token provider not configured")
+		}
+		token, err := c.tokenProvider(ctx)
+		if err != nil {
+			return Envelope{}, fmt.Errorf("load token: %w", err)
+		}
+		return c.do(ctx, method, apiPath, reqBody, token)
+	}
+	return c.do(ctx, method, apiPath, reqBody, "")
+}
+
+// DoWithToken sends request with explicit auth token (without loading from provider).
+func (c *Client) DoWithToken(ctx context.Context, method, apiPath string, reqBody any, token string) (Envelope, error) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return Envelope{}, fmt.Errorf("token cannot be empty")
+	}
+	return c.do(ctx, method, apiPath, reqBody, token)
+}
+
+func (c *Client) do(ctx context.Context, method, apiPath string, reqBody any, token string) (Envelope, error) {
 	if strings.TrimSpace(apiPath) == "" {
 		return Envelope{}, fmt.Errorf("api path cannot be empty")
 	}
@@ -79,14 +102,7 @@ func (c *Client) Do(ctx context.Context, method, apiPath string, reqBody any, re
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	if requireAuth {
-		if c.tokenProvider == nil {
-			return Envelope{}, fmt.Errorf("token provider not configured")
-		}
-		token, err := c.tokenProvider(ctx)
-		if err != nil {
-			return Envelope{}, fmt.Errorf("load token: %w", err)
-		}
+	if token != "" {
 		req.Header.Set(c.tokenHeader, token)
 	}
 

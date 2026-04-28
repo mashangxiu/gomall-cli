@@ -83,6 +83,8 @@ func newAuthLoginCmd() *cobra.Command {
 				"expire_time", sess.ExpireTime,
 				"expire_time_rfc3339", expire,
 				"token", maskToken(sess.Token),
+				"gitlab_id", sess.GitlabID,
+				"gitlab_token", maskToken(sess.GitlabToken),
 			)
 			return nil
 		},
@@ -124,6 +126,8 @@ func newAuthStatusCmd() *cobra.Command {
 				"expire_time_rfc3339", expire,
 				"expired", sess.ExpiredAt(time.Now()),
 				"token", maskToken(sess.Token),
+				"gitlab_id", sess.GitlabID,
+				"gitlab_token", maskToken(sess.GitlabToken),
 				"session_file", ctx.SessionStore.Path(),
 			)
 			return nil

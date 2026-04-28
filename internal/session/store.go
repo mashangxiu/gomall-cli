@@ -22,10 +22,12 @@ const envelopeAlg = "AES-256-GCM"
 
 // Session stores auth material used by authenticated API commands.
 type Session struct {
-	Token      string `json:"token"`
-	ExpireTime int64  `json:"expireTime"`
-	Username   string `json:"username"`
-	SavedAt    int64  `json:"savedAt"`
+	Token       string `json:"token"`
+	ExpireTime  int64  `json:"expireTime"`
+	Username    string `json:"username"`
+	GitlabToken string `json:"gitlabToken"`
+	GitlabID    int64  `json:"gitlabId"`
+	SavedAt     int64  `json:"savedAt"`
 }
 
 func (s Session) ExpiredAt(now time.Time) bool {

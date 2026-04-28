@@ -2,10 +2,16 @@ package cmd
 
 import (
 	"fmt"
+	"net/url"
+	"os"
+	pathpkg "path"
+	"path/filepath"
 	"strings"
 	"text/tabwriter"
 	"time"
 
+	gogit "github.com/go-git/go-git/v5"
+	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 	"github.com/spf13/cobra"
 
 	"gomall-cli/internal/app"
@@ -21,6 +27,7 @@ func newModelCmd() *cobra.Command {
 
 	modelCmd.AddCommand(newModelSearchCmd())
 	modelCmd.AddCommand(newModelCreatedCmd())
+	modelCmd.AddCommand(newModelCloneCmd())
 	modelCmd.AddCommand(newModelDetailCmd())
 	return modelCmd
 }
@@ -135,6 +142,84 @@ func newModelCreatedCmd() *cobra.Command {
 	return cmd
 }
 
+func newModelCloneCmd() *cobra.Command {
+	var into string
+	var dir string
+
+	cmd := &cobra.Command{
+		Use:   "clone 作者/名称",
+		Short: "Clone model repository to local directory",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			author, name, err := splitModelRef(args[0])
+			if err != nil {
+				return clierr.New(clierr.CodeInvalidInput, "参数错误："+err.Error())
+			}
+
+			ctx, err := app.FromContext(cmd.Context())
+			if err != nil {
+				return err
+			}
+
+			svc := model.NewService(ctx.APIClient)
+			detail, err := svc.Detail(cmd.Context(), author, name)
+			if err != nil {
+				ctx.Logger.Error("model detail failed before clone", "error", err, "author", author, "name", name)
+				return clierr.New(clierr.CodeRuntime, "获取模型详情失败："+err.Error())
+			}
+			repoURL := strings.TrimSpace(detail.LabAddress)
+			if repoURL == "" {
+				return clierr.New(clierr.CodeRuntime, "模型仓库地址为空，无法克隆")
+			}
+
+			targetDir, err := resolveCloneTarget(repoURL, detail.Name, into, dir)
+			if err != nil {
+				return clierr.New(clierr.CodeInvalidInput, "参数错误："+err.Error())
+			}
+			if _, statErr := os.Stat(targetDir); statErr == nil {
+				return clierr.New(clierr.CodeInvalidInput, "目标目录已存在："+targetDir)
+			} else if !os.IsNotExist(statErr) {
+				return clierr.New(clierr.CodeRuntime, "检查目标目录失败："+statErr.Error())
+			}
+			if mkErr := os.MkdirAll(filepath.Dir(targetDir), 0o755); mkErr != nil {
+				return clierr.New(clierr.CodeRuntime, "创建父目录失败："+mkErr.Error())
+			}
+
+			sess, err := ctx.SessionStore.Load()
+			if err != nil {
+				return clierr.New(clierr.CodeRuntime, "读取本地登录态失败："+err.Error())
+			}
+			gitlabToken := strings.TrimSpace(sess.GitlabToken)
+			if gitlabToken == "" {
+				return clierr.New(
+					clierr.CodeRuntime,
+					"当前登录态缺少 GitLab 认证信息，请先重新执行 gomall-cli auth login",
+				)
+			}
+
+			fmt.Printf("开始克隆: %s\n", repoURL)
+			fmt.Printf("目标目录: %s\n", targetDir)
+			_, err = gogit.PlainCloneContext(cmd.Context(), targetDir, false, &gogit.CloneOptions{
+				URL:      repoURL,
+				Auth:     &githttp.BasicAuth{Username: "oauth2", Password: gitlabToken},
+				Progress: cmd.OutOrStdout(),
+			})
+			if err != nil {
+				ctx.Logger.Error("model clone failed", "error", err, "repo_url", repoURL, "target_dir", targetDir)
+				return clierr.New(clierr.CodeRuntime, "克隆失败："+err.Error())
+			}
+
+			fmt.Println("克隆成功")
+			fmt.Printf("本地路径: %s\n", targetDir)
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&into, "into", ".", "parent directory to place cloned repository")
+	cmd.Flags().StringVar(&dir, "dir", "", "explicit target directory, overrides --into")
+	return cmd
+}
+
 func newModelDetailCmd() *cobra.Command {
 	var showReadme bool
 
@@ -210,4 +295,34 @@ func splitModelRef(ref string) (string, string, error) {
 		return "", "", fmt.Errorf("作者和名称都不能为空")
 	}
 	return author, name, nil
+}
+
+func resolveCloneTarget(repoURL, modelName, into, dir string) (string, error) {
+	if strings.TrimSpace(dir) != "" {
+		return filepath.Clean(strings.TrimSpace(dir)), nil
+	}
+
+	into = strings.TrimSpace(into)
+	if into == "" {
+		into = "."
+	}
+	base := deriveRepoDirName(repoURL, modelName)
+	if strings.TrimSpace(base) == "" {
+		return "", fmt.Errorf("无法从仓库地址推断目录名，请使用 --dir 指定")
+	}
+	return filepath.Join(filepath.Clean(into), base), nil
+}
+
+func deriveRepoDirName(repoURL, fallback string) string {
+	u, err := url.Parse(strings.TrimSpace(repoURL))
+	if err == nil {
+		seg := pathpkg.Base(u.Path)
+		seg = strings.TrimSuffix(seg, ".git")
+		seg = strings.TrimSpace(seg)
+		if seg != "" && seg != "." && seg != "/" {
+			return seg
+		}
+	}
+	fallback = strings.TrimSpace(fallback)
+	return strings.TrimSuffix(fallback, ".git")
 }

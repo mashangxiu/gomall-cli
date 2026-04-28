@@ -32,6 +32,17 @@ type loginRespData struct {
 	Username   string `json:"username"`
 }
 
+type currentUserReq struct {
+	NeedAll bool `json:"need_all"`
+}
+
+type currentUserRespData struct {
+	Token    string `json:"token"`
+	GitlabID int64  `json:"gitlab_id"`
+}
+
+const currentUserPath = "/goMallApi/api/users/get_current_user"
+
 // LoginFailureError describes business-level login rejection returned by server.
 type LoginFailureError struct {
 	Code      int
@@ -90,10 +101,31 @@ func (s *Service) Login(ctx context.Context, username, password string) (session
 		data.Username = username
 	}
 
+	currentUserEnv, err := s.client.DoWithToken(ctx, http.MethodPost, currentUserPath, currentUserReq{
+		NeedAll: true,
+	}, data.Token)
+	if err != nil {
+		return session.Session{}, fmt.Errorf("query current user failed: %w", err)
+	}
+	if currentUserEnv.Code != 200 {
+		return session.Session{}, fmt.Errorf("query current user failed: code=%d message=%s", currentUserEnv.Code, currentUserEnv.Message)
+	}
+
+	var currentUser currentUserRespData
+	if err := currentUserEnv.DecodeData(&currentUser); err != nil {
+		return session.Session{}, fmt.Errorf("decode current user failed: %w", err)
+	}
+	currentUser.Token = strings.TrimSpace(currentUser.Token)
+	if currentUser.Token == "" {
+		return session.Session{}, fmt.Errorf("query current user failed: missing gitlab token")
+	}
+
 	sess := session.Session{
-		Token:      data.Token,
-		ExpireTime: data.ExpireTime,
-		Username:   data.Username,
+		Token:       data.Token,
+		ExpireTime:  data.ExpireTime,
+		Username:    data.Username,
+		GitlabToken: currentUser.Token,
+		GitlabID:    currentUser.GitlabID,
 	}
 
 	if err := s.store.Save(sess); err != nil {

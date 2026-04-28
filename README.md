@@ -41,9 +41,14 @@ go run . model created --name qwen
 # model detail by author/name (requires login first)
 go run . model detail gomall/test1
 go run . model detail gomall/test1 --show-readme
+
+# clone model repository (requires login first)
+go run . model clone gomall/test1
+go run . model clone gomall/test1 --into ./downloads
 ```
 
-After login, `token / expireTime / username` are stored in a local session file.
+After login, CLI stores `token / expireTime / username / gitlabToken / gitlabId` in local session file.
+`gitlabToken` is fetched from `/goMallApi/api/users/get_current_user` right after login, and `model clone` uses it for Git authentication.
 Session file is encrypted with AES-256-GCM.
 Session key is always machine-derived.
 Machine-derived secret supports macOS / Linux / Windows.
