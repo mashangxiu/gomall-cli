@@ -30,10 +30,12 @@ type LogConfig struct {
 }
 
 type APIConfig struct {
-	BaseURL   string
-	Timeout   time.Duration
-	Insecure  bool
-	UserAgent string
+	BaseURL        string
+	Timeout        time.Duration
+	LFSTimeout     time.Duration
+	LFSIdleTimeout time.Duration
+	Insecure       bool
+	UserAgent      string
 }
 
 type AuthConfig struct {
@@ -51,8 +53,10 @@ func init() {
 	globalViper.SetDefault("log-level", "info")
 	globalViper.SetDefault("log-format", "text")
 
-	globalViper.SetDefault("api-base-url", "http://gomall.ac.cn")
+	globalViper.SetDefault("api-base-url", "http://gomall.ac.cn/goMallApi/api")
 	globalViper.SetDefault("api-timeout", "10s")
+	globalViper.SetDefault("api-lfs-timeout", "30m")
+	globalViper.SetDefault("api-lfs-idle-timeout", "2m")
 	globalViper.SetDefault("api-insecure", false)
 	globalViper.SetDefault("api-user-agent", "gomall-cli/0.1.0")
 
@@ -68,6 +72,8 @@ func BindPFlags(flags *pflag.FlagSet) error {
 		"log-format",
 		"api-base-url",
 		"api-timeout",
+		"api-lfs-timeout",
+		"api-lfs-idle-timeout",
 		"api-insecure",
 		"api-user-agent",
 		"auth-login-path",
@@ -121,10 +127,12 @@ func Load(cmd *cobra.Command, cfgFile string) (Config, error) {
 			Format: globalViper.GetString("log-format"),
 		},
 		API: APIConfig{
-			BaseURL:   globalViper.GetString("api-base-url"),
-			Timeout:   globalViper.GetDuration("api-timeout"),
-			Insecure:  globalViper.GetBool("api-insecure"),
-			UserAgent: globalViper.GetString("api-user-agent"),
+			BaseURL:        globalViper.GetString("api-base-url"),
+			Timeout:        globalViper.GetDuration("api-timeout"),
+			LFSTimeout:     globalViper.GetDuration("api-lfs-timeout"),
+			LFSIdleTimeout: globalViper.GetDuration("api-lfs-idle-timeout"),
+			Insecure:       globalViper.GetBool("api-insecure"),
+			UserAgent:      globalViper.GetString("api-user-agent"),
 		},
 		Auth: AuthConfig{
 			LoginPath:   globalViper.GetString("auth-login-path"),
@@ -166,6 +174,12 @@ func validate(cfg Config) error {
 
 	if cfg.API.Timeout <= 0 {
 		return fmt.Errorf("api-timeout must be > 0")
+	}
+	if cfg.API.LFSTimeout <= 0 {
+		return fmt.Errorf("api-lfs-timeout must be > 0")
+	}
+	if cfg.API.LFSIdleTimeout <= 0 {
+		return fmt.Errorf("api-lfs-idle-timeout must be > 0")
 	}
 
 	if strings.TrimSpace(cfg.Auth.LoginPath) == "" {

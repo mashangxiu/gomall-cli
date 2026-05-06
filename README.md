@@ -45,10 +45,12 @@ go run . model detail gomall/test1 --show-readme
 # clone model repository (requires login first)
 go run . model clone gomall/test1
 go run . model clone gomall/test1 --into ./downloads
+go run . model clone 1700
 ```
 
 After login, CLI stores `token / expireTime / username / gitlabToken / gitlabId` in local session file.
 `gitlabToken` is fetched from `/goMallApi/api/users/get_current_user` right after login, and `model clone` uses it for Git authentication.
+After clone, CLI will automatically hydrate Git LFS pointer files with concurrent download + retry (exponential backoff), and show real-time progress (speed / remaining / ETA).
 Session file is encrypted with AES-256-GCM.
 Session key is always machine-derived.
 Machine-derived secret supports macOS / Linux / Windows.
@@ -67,6 +69,8 @@ Default session file:
 --log-format string
 --api-base-url string
 --api-timeout duration
+--api-lfs-timeout duration
+--api-lfs-idle-timeout duration
 --api-insecure
 --api-user-agent string
 --auth-login-path string
@@ -83,6 +87,8 @@ All env vars use `GOMALL_` prefix.
 - `GOMALL_LOG_FORMAT`
 - `GOMALL_API_BASE_URL`
 - `GOMALL_API_TIMEOUT`
+- `GOMALL_API_LFS_TIMEOUT`
+- `GOMALL_API_LFS_IDLE_TIMEOUT`
 - `GOMALL_API_INSECURE`
 - `GOMALL_API_USER_AGENT`
 - `GOMALL_AUTH_LOGIN_PATH`

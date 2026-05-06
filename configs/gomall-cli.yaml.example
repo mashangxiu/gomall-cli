@@ -2,8 +2,10 @@ env: dev
 log-level: info
 log-format: text
 
-api-base-url: http://gomall.ac.cn
+api-base-url: http://gomall.ac.cn/goMallApi/api
 api-timeout: 10s
+api-lfs-timeout: 30m
+api-lfs-idle-timeout: 2m
 api-insecure: false
 api-user-agent: gomall-cli/0.1.0
 

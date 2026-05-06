@@ -17,6 +17,7 @@ import (
 
 	"gomall-cli/internal/app"
 	"gomall-cli/internal/clierr"
+	"gomall-cli/internal/gitlfs"
 	"gomall-cli/internal/model"
 )
 
@@ -186,13 +187,22 @@ func newModelCloneCmd() *cobra.Command {
 			if err != nil {
 				return clierr.New(clierr.CodeInvalidInput, "参数错误："+err.Error())
 			}
-			if _, statErr := os.Stat(targetDir); statErr == nil {
-				return clierr.New(clierr.CodeInvalidInput, "目标目录已存在："+targetDir)
+			resumeMode := false
+			if stat, statErr := os.Stat(targetDir); statErr == nil {
+				if !stat.IsDir() {
+					return clierr.New(clierr.CodeInvalidInput, "目标路径已存在且不是目录："+targetDir)
+				}
+				if err := ensureResumableRepo(targetDir, repoURL); err != nil {
+					return clierr.New(clierr.CodeInvalidInput, err.Error())
+				}
+				resumeMode = true
 			} else if !os.IsNotExist(statErr) {
 				return clierr.New(clierr.CodeRuntime, "检查目标目录失败："+statErr.Error())
 			}
-			if mkErr := os.MkdirAll(filepath.Dir(targetDir), 0o755); mkErr != nil {
-				return clierr.New(clierr.CodeRuntime, "创建父目录失败："+mkErr.Error())
+			if !resumeMode {
+				if mkErr := os.MkdirAll(filepath.Dir(targetDir), 0o755); mkErr != nil {
+					return clierr.New(clierr.CodeRuntime, "创建父目录失败："+mkErr.Error())
+				}
 			}
 
 			sess, err := ctx.SessionStore.Load()
@@ -207,16 +217,41 @@ func newModelCloneCmd() *cobra.Command {
 				)
 			}
 
-			fmt.Printf("开始克隆: %s\n", repoURL)
-			fmt.Printf("目标目录: %s\n", targetDir)
-			_, err = gogit.PlainCloneContext(cmd.Context(), targetDir, false, &gogit.CloneOptions{
-				URL:      repoURL,
-				Auth:     &githttp.BasicAuth{Username: "oauth2", Password: gitlabToken},
-				Progress: cmd.OutOrStdout(),
+			if resumeMode {
+				fmt.Printf("目标目录已存在，进入断点续传模式: %s\n", targetDir)
+			} else {
+				fmt.Printf("开始克隆: %s\n", repoURL)
+				fmt.Printf("目标目录: %s\n", targetDir)
+				_, err = gogit.PlainCloneContext(cmd.Context(), targetDir, false, &gogit.CloneOptions{
+					URL:      repoURL,
+					Auth:     &githttp.BasicAuth{Username: "oauth2", Password: gitlabToken},
+					Progress: cmd.OutOrStdout(),
+				})
+				if err != nil {
+					ctx.Logger.Error("model clone failed", "error", err, "repo_url", repoURL, "target_dir", targetDir)
+					return clierr.New(clierr.CodeRuntime, "克隆失败："+err.Error())
+				}
+			}
+
+			fmt.Println("开始补全 Git LFS 大文件...")
+			hydrated, err := gitlfs.Hydrate(cmd.Context(), gitlfs.HydrateOptions{
+				RepoDir:     targetDir,
+				RepoURL:     repoURL,
+				Token:       gitlabToken,
+				UserAgent:   ctx.Config.API.UserAgent,
+				Insecure:    ctx.Config.API.Insecure,
+				HTTPTimeout: ctx.Config.API.LFSTimeout,
+				IdleTimeout: ctx.Config.API.LFSIdleTimeout,
+				ProgressOut: cmd.OutOrStdout(),
 			})
 			if err != nil {
-				ctx.Logger.Error("model clone failed", "error", err, "repo_url", repoURL, "target_dir", targetDir)
-				return clierr.New(clierr.CodeRuntime, "克隆失败："+err.Error())
+				ctx.Logger.Error("git lfs hydrate failed", "error", err, "repo_url", repoURL, "target_dir", targetDir)
+				return clierr.New(clierr.CodeRuntime, "Git LFS 大文件补全失败："+err.Error())
+			}
+			if hydrated == 0 {
+				fmt.Println("Git LFS: 未发现需要补全的大文件")
+			} else {
+				fmt.Printf("Git LFS 补全成功：%d 个文件\n", hydrated)
 			}
 
 			fmt.Println("克隆成功")
@@ -344,6 +379,36 @@ func deriveRepoDirName(repoURL, fallback string) string {
 	}
 	fallback = strings.TrimSpace(fallback)
 	return strings.TrimSuffix(fallback, ".git")
+}
+
+func ensureResumableRepo(targetDir, expectedRepoURL string) error {
+	repo, err := gogit.PlainOpen(targetDir)
+	if err != nil {
+		return fmt.Errorf("目标目录已存在但不是可续传的 Git 仓库，请更换目录或先清理该目录: %s", targetDir)
+	}
+	cfg, err := repo.Config()
+	if err != nil {
+		return fmt.Errorf("读取目标仓库配置失败: %w", err)
+	}
+	origin, ok := cfg.Remotes[gogit.DefaultRemoteName]
+	if !ok || len(origin.URLs) == 0 {
+		return fmt.Errorf("目标仓库缺少 origin 远程地址，无法确认是否可续传: %s", targetDir)
+	}
+	if !sameRepoURL(origin.URLs[0], expectedRepoURL) {
+		return fmt.Errorf("目标目录仓库与当前模型仓库不一致，请使用 --dir 指定新目录")
+	}
+	return nil
+}
+
+func sameRepoURL(a, b string) bool {
+	normalize := func(s string) string {
+		s = strings.TrimSpace(strings.ToLower(s))
+		s = strings.TrimSuffix(s, "/")
+		s = strings.TrimSuffix(s, ".git")
+		s = strings.TrimSuffix(s, "/")
+		return s
+	}
+	return normalize(a) == normalize(b)
 }
 
 func tryParsePositiveInt64(raw string) (int64, bool) {
