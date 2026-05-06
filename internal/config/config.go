@@ -30,12 +30,14 @@ type LogConfig struct {
 }
 
 type APIConfig struct {
-	BaseURL        string
-	Timeout        time.Duration
-	LFSTimeout     time.Duration
-	LFSIdleTimeout time.Duration
-	Insecure       bool
-	UserAgent      string
+	BaseURL                string
+	Timeout                time.Duration
+	LFSTimeout             time.Duration
+	LFSIdleTimeout         time.Duration
+	LFSChunkSizeMB         int
+	LFSDownloadURLOverride string
+	Insecure               bool
+	UserAgent              string
 }
 
 type AuthConfig struct {
@@ -57,6 +59,8 @@ func init() {
 	globalViper.SetDefault("api-timeout", "10s")
 	globalViper.SetDefault("api-lfs-timeout", "30m")
 	globalViper.SetDefault("api-lfs-idle-timeout", "2m")
+	globalViper.SetDefault("api-lfs-chunk-size-mb", 64)
+	globalViper.SetDefault("api-lfs-download-url-override", "")
 	globalViper.SetDefault("api-insecure", false)
 	globalViper.SetDefault("api-user-agent", "gomall-cli/0.1.0")
 
@@ -74,6 +78,8 @@ func BindPFlags(flags *pflag.FlagSet) error {
 		"api-timeout",
 		"api-lfs-timeout",
 		"api-lfs-idle-timeout",
+		"api-lfs-chunk-size-mb",
+		"api-lfs-download-url-override",
 		"api-insecure",
 		"api-user-agent",
 		"auth-login-path",
@@ -127,12 +133,14 @@ func Load(cmd *cobra.Command, cfgFile string) (Config, error) {
 			Format: globalViper.GetString("log-format"),
 		},
 		API: APIConfig{
-			BaseURL:        globalViper.GetString("api-base-url"),
-			Timeout:        globalViper.GetDuration("api-timeout"),
-			LFSTimeout:     globalViper.GetDuration("api-lfs-timeout"),
-			LFSIdleTimeout: globalViper.GetDuration("api-lfs-idle-timeout"),
-			Insecure:       globalViper.GetBool("api-insecure"),
-			UserAgent:      globalViper.GetString("api-user-agent"),
+			BaseURL:                globalViper.GetString("api-base-url"),
+			Timeout:                globalViper.GetDuration("api-timeout"),
+			LFSTimeout:             globalViper.GetDuration("api-lfs-timeout"),
+			LFSIdleTimeout:         globalViper.GetDuration("api-lfs-idle-timeout"),
+			LFSChunkSizeMB:         globalViper.GetInt("api-lfs-chunk-size-mb"),
+			LFSDownloadURLOverride: strings.TrimSpace(globalViper.GetString("api-lfs-download-url-override")),
+			Insecure:               globalViper.GetBool("api-insecure"),
+			UserAgent:              globalViper.GetString("api-user-agent"),
 		},
 		Auth: AuthConfig{
 			LoginPath:   globalViper.GetString("auth-login-path"),
@@ -180,6 +188,21 @@ func validate(cfg Config) error {
 	}
 	if cfg.API.LFSIdleTimeout <= 0 {
 		return fmt.Errorf("api-lfs-idle-timeout must be > 0")
+	}
+	if cfg.API.LFSChunkSizeMB <= 0 {
+		return fmt.Errorf("api-lfs-chunk-size-mb must be > 0")
+	}
+	if cfg.API.LFSDownloadURLOverride != "" {
+		overrideURL, err := url.Parse(cfg.API.LFSDownloadURLOverride)
+		if err != nil {
+			return fmt.Errorf("invalid api-lfs-download-url-override %q: %w", cfg.API.LFSDownloadURLOverride, err)
+		}
+		if overrideURL.Scheme == "" || overrideURL.Host == "" {
+			return fmt.Errorf(
+				"api-lfs-download-url-override must include scheme and host, got %q",
+				cfg.API.LFSDownloadURLOverride,
+			)
+		}
 	}
 
 	if strings.TrimSpace(cfg.Auth.LoginPath) == "" {

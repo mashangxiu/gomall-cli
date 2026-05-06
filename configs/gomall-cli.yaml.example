@@ -6,6 +6,8 @@ api-base-url: http://gomall.ac.cn/goMallApi/api
 api-timeout: 10s
 api-lfs-timeout: 30m
 api-lfs-idle-timeout: 2m
+api-lfs-chunk-size-mb: 16
+api-lfs-download-url-override: ""
 api-insecure: false
 api-user-agent: gomall-cli/0.1.0
 

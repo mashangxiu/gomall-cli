@@ -1,6 +1,9 @@
 package gitlfs
 
 import (
+	"bytes"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 )
@@ -85,5 +88,86 @@ func TestFormatDuration(t *testing.T) {
 		if got != c.want {
 			t.Fatalf("formatDuration(%s)=%s, want=%s", c.in, got, c.want)
 		}
+	}
+}
+
+func TestRewriteDownloadURL_KeepPathAndQuery(t *testing.T) {
+	t.Parallel()
+
+	orig := "http://10.170.130.22/lfs-objects/a8/8b/abc?AWSAccessKeyId=gomall&Signature=xyz&Expires=1778052324"
+	got, err := rewriteDownloadURL(orig, "http://my.host.cn")
+	if err != nil {
+		t.Fatalf("rewriteDownloadURL() error=%v", err)
+	}
+	u, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("parse got url error=%v", err)
+	}
+	if u.Scheme != "http" || u.Host != "my.host.cn" {
+		t.Fatalf("host override failed: %s", got)
+	}
+	if u.Path != "/lfs-objects/a8/8b/abc" {
+		t.Fatalf("path changed unexpectedly: %s", u.Path)
+	}
+	if u.RawQuery == "" {
+		t.Fatalf("query should be kept")
+	}
+}
+
+func TestRewriteDownloadURL_WithOverridePathPrefix(t *testing.T) {
+	t.Parallel()
+
+	orig := "http://10.170.130.22/lfs-objects/a8/8b/abc?x=1"
+	got, err := rewriteDownloadURL(orig, "http://my.host.cn/proxy")
+	if err != nil {
+		t.Fatalf("rewriteDownloadURL() error=%v", err)
+	}
+	u, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("parse got url error=%v", err)
+	}
+	if u.Path != "/proxy/lfs-objects/a8/8b/abc" {
+		t.Fatalf("path prefix override failed: %s", u.Path)
+	}
+}
+
+func TestApplyDownloadURLOverride(t *testing.T) {
+	t.Parallel()
+
+	resp := map[string]batchResponseObject{
+		"oid1": {
+			OID: "oid1",
+			Actions: map[string]batchAction{
+				batchOpDownload: {Href: "http://10.1.1.1/lfs-objects/a?x=1"},
+			},
+		},
+	}
+	if err := applyDownloadURLOverride(resp, "http://my.host.cn", false, nil); err != nil {
+		t.Fatalf("applyDownloadURLOverride() error=%v", err)
+	}
+	got := resp["oid1"].Actions[batchOpDownload].Href
+	if got != "http://my.host.cn/lfs-objects/a?x=1" {
+		t.Fatalf("applyDownloadURLOverride()=%s", got)
+	}
+}
+
+func TestApplyDownloadURLOverride_DebugPrintAfterURL(t *testing.T) {
+	t.Parallel()
+
+	resp := map[string]batchResponseObject{
+		"oid1": {
+			OID: "oid1",
+			Actions: map[string]batchAction{
+				batchOpDownload: {Href: "http://10.1.1.1/lfs-objects/a?x=1"},
+			},
+		},
+	}
+	var buf bytes.Buffer
+	if err := applyDownloadURLOverride(resp, "http://my.host.cn", true, &buf); err != nil {
+		t.Fatalf("applyDownloadURLOverride() error=%v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "[DEBUG] after: http://my.host.cn/lfs-objects/a?x=1") {
+		t.Fatalf("debug output missing replaced url, got=%q", out)
 	}
 }

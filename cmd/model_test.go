@@ -1,10 +1,13 @@
 package cmd
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	gogit "github.com/go-git/go-git/v5"
 	ggconfig "github.com/go-git/go-git/v5/config"
+	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
 func TestSplitModelRef(t *testing.T) {
@@ -120,5 +123,86 @@ func TestEnsureResumableRepo(t *testing.T) {
 	}
 	if err := ensureResumableRepo(dir, "http://gomall.ac.cn/a/c"); err == nil {
 		t.Fatalf("ensureResumableRepo() should fail for mismatched repo")
+	}
+}
+
+func TestRestoreMissingTrackedFiles_DoesNotOverwriteExistingFiles(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	repo, err := gogit.PlainInit(repoDir, false)
+	if err != nil {
+		t.Fatalf("PlainInit() error = %v", err)
+	}
+
+	trackedPointer := []byte("version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 3\n")
+	if err := os.WriteFile(filepath.Join(repoDir, "model.bin"), trackedPointer, 0o644); err != nil {
+		t.Fatalf("WriteFile(model.bin) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("hello"), 0o644); err != nil {
+		t.Fatalf("WriteFile(README.md) error = %v", err)
+	}
+
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("Worktree() error = %v", err)
+	}
+	if _, err := wt.Add("model.bin"); err != nil {
+		t.Fatalf("Add(model.bin) error = %v", err)
+	}
+	if _, err := wt.Add("README.md"); err != nil {
+		t.Fatalf("Add(README.md) error = %v", err)
+	}
+	if _, err := wt.Commit("init", &gogit.CommitOptions{
+		Author: &object.Signature{Name: "test", Email: "test@example.com"},
+	}); err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+
+	head, err := repo.Head()
+	if err != nil {
+		t.Fatalf("Head() error = %v", err)
+	}
+	commit, err := repo.CommitObject(head.Hash())
+	if err != nil {
+		t.Fatalf("CommitObject() error = %v", err)
+	}
+	tree, err := commit.Tree()
+	if err != nil {
+		t.Fatalf("Tree() error = %v", err)
+	}
+
+	// Simulate hydrated LFS content already present locally.
+	hydrated := []byte{0x01, 0x02, 0x03, 0x04}
+	if err := os.WriteFile(filepath.Join(repoDir, "model.bin"), hydrated, 0o644); err != nil {
+		t.Fatalf("overwrite model.bin error = %v", err)
+	}
+	// Simulate missing normal git file that should be recovered.
+	if err := os.Remove(filepath.Join(repoDir, "README.md")); err != nil {
+		t.Fatalf("Remove(README.md) error = %v", err)
+	}
+
+	restored, err := restoreMissingTrackedFiles(repoDir, tree)
+	if err != nil {
+		t.Fatalf("restoreMissingTrackedFiles() error = %v", err)
+	}
+	if restored != 1 {
+		t.Fatalf("restored = %d, want 1", restored)
+	}
+
+	gotHydrated, err := os.ReadFile(filepath.Join(repoDir, "model.bin"))
+	if err != nil {
+		t.Fatalf("ReadFile(model.bin) error = %v", err)
+	}
+	if string(gotHydrated) != string(hydrated) {
+		t.Fatalf("model.bin should keep hydrated content, got %q", string(gotHydrated))
+	}
+
+	gotReadme, err := os.ReadFile(filepath.Join(repoDir, "README.md"))
+	if err != nil {
+		t.Fatalf("ReadFile(README.md) error = %v", err)
+	}
+	if string(gotReadme) != "hello" {
+		t.Fatalf("README.md = %q, want %q", string(gotReadme), "hello")
 	}
 }

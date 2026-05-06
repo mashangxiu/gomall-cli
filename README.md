@@ -50,7 +50,7 @@ go run . model clone 1700
 
 After login, CLI stores `token / expireTime / username / gitlabToken / gitlabId` in local session file.
 `gitlabToken` is fetched from `/goMallApi/api/users/get_current_user` right after login, and `model clone` uses it for Git authentication.
-After clone, CLI will automatically hydrate Git LFS pointer files with concurrent download + retry (exponential backoff), and show real-time progress (speed / remaining / ETA).
+After clone, CLI will automatically hydrate Git LFS pointer files with concurrent download + retry (exponential backoff), and show real-time progress (speed / remaining / ETA). If server supports HTTP Range, large files are downloaded in parallel chunks.
 Session file is encrypted with AES-256-GCM.
 Session key is always machine-derived.
 Machine-derived secret supports macOS / Linux / Windows.
@@ -71,6 +71,8 @@ Default session file:
 --api-timeout duration
 --api-lfs-timeout duration
 --api-lfs-idle-timeout duration
+--api-lfs-chunk-size-mb int
+--api-lfs-download-url-override string
 --api-insecure
 --api-user-agent string
 --auth-login-path string
@@ -89,8 +91,20 @@ All env vars use `GOMALL_` prefix.
 - `GOMALL_API_TIMEOUT`
 - `GOMALL_API_LFS_TIMEOUT`
 - `GOMALL_API_LFS_IDLE_TIMEOUT`
+- `GOMALL_API_LFS_CHUNK_SIZE_MB`
+- `GOMALL_API_LFS_DOWNLOAD_URL_OVERRIDE`
 - `GOMALL_API_INSECURE`
 - `GOMALL_API_USER_AGENT`
 - `GOMALL_AUTH_LOGIN_PATH`
 - `GOMALL_AUTH_TOKEN_HEADER`
 - `GOMALL_AUTH_SESSION_FILE`
+
+## LFS Download URL Override
+
+When LFS batch response returns internal download hosts (for example `http://10.x.x.x/lfs-objects/...`), you can force override to another host:
+
+```yaml
+api-lfs-download-url-override: "http://my.host.cn"
+```
+
+Then `download.href` will be rewritten as `http://my.host.cn/lfs-objects/...` while keeping original query params/signature.

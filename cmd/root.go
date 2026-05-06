@@ -106,6 +106,8 @@ func bindGlobalFlags(cmd *cobra.Command, cfgFile *string) error {
 	flags.Duration("api-timeout", 10_000_000_000, "HTTP timeout, e.g. 5s, 30s")
 	flags.Duration("api-lfs-timeout", 30*time.Minute, "LFS download timeout, e.g. 5m, 30m")
 	flags.Duration("api-lfs-idle-timeout", 2*time.Minute, "LFS idle timeout with no bytes received, e.g. 30s, 2m")
+	flags.Int("api-lfs-chunk-size-mb", 16, "LFS chunk size in MB for multipart range download")
+	flags.String("api-lfs-download-url-override", "", "force override LFS download URL base, e.g. http://my.host.cn")
 	flags.Bool("api-insecure", false, "skip TLS certificate verification")
 	flags.String("api-user-agent", "gomall-cli/0.1.0", "custom User-Agent for API requests")
 	flags.String("auth-login-path", "/api/auth/login", "login API path")

@@ -1,6 +1,7 @@
 package gitlfs
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
@@ -22,6 +23,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/schollz/progressbar/v3"
 )
 
 const (
@@ -32,17 +35,24 @@ const (
 	lfsBackoffBase  = 500 * time.Millisecond
 	lfsBackoffMax   = 5 * time.Second
 	lfsResumeDir    = ".gomall-cli-lfs"
+	lfsChunkWorkers = 4
+	lfsChunkSize    = 16 * 1024 * 1024  // 16MB
+	lfsChunkMinSize = 256 * 1024 * 1024 // 256MB+
 )
 
 type HydrateOptions struct {
-	RepoDir     string
-	RepoURL     string
-	Token       string
-	UserAgent   string
-	Insecure    bool
-	HTTPTimeout time.Duration
-	IdleTimeout time.Duration
-	ProgressOut io.Writer
+	RepoDir             string
+	RepoURL             string
+	Token               string
+	UserAgent           string
+	Insecure            bool
+	HTTPTimeout         time.Duration
+	IdleTimeout         time.Duration
+	ChunkSize           int64
+	DownloadURLOverride string
+	ProgressOut         io.Writer
+	DebugBatch          bool
+	DebugOut            io.Writer
 }
 
 type pointerFile struct {
@@ -93,6 +103,18 @@ type lfsDownloadTask struct {
 	part   string
 }
 
+type rangeChunk struct {
+	idx   int
+	start int64
+	end   int64
+}
+
+type multipartState struct {
+	Size      int64  `json:"size"`
+	ChunkSize int64  `json:"chunkSize"`
+	Done      []bool `json:"done"`
+}
+
 func Hydrate(ctx context.Context, opts HydrateOptions) (int, error) {
 	repoDir := strings.TrimSpace(opts.RepoDir)
 	repoURL := strings.TrimSpace(opts.RepoURL)
@@ -114,6 +136,10 @@ func Hydrate(ctx context.Context, opts HydrateOptions) (int, error) {
 	idleTimeout := opts.IdleTimeout
 	if idleTimeout <= 0 {
 		idleTimeout = 2 * time.Minute
+	}
+	chunkSize := opts.ChunkSize
+	if chunkSize <= 0 {
+		chunkSize = lfsChunkSize
 	}
 
 	pointers, err := collectPointers(repoDir)
@@ -152,17 +178,28 @@ func Hydrate(ctx context.Context, opts HydrateOptions) (int, error) {
 		})
 	}
 
-	respMap, err := requestBatch(ctx, client, batchURL, opts.UserAgent, token, reqObjects)
+	respMap, err := requestBatch(
+		ctx,
+		client,
+		batchURL,
+		opts.UserAgent,
+		token,
+		reqObjects,
+		opts.DebugBatch,
+		opts.DebugOut,
+	)
 	if err != nil {
+		return 0, err
+	}
+	if err := applyDownloadURLOverride(respMap, opts.DownloadURLOverride, opts.DebugBatch, opts.DebugOut); err != nil {
 		return 0, err
 	}
 
 	progress := newProgressReporter(opts.ProgressOut, totalBytes)
-	progress.start()
-	defer progress.finish()
 
 	tasks := make([]lfsDownloadTask, 0, len(grouped))
 	var resumedBytes int64
+	var localHitCount int
 	for oid, files := range grouped {
 		obj, ok := respMap[oid]
 		if !ok {
@@ -175,28 +212,52 @@ func Hydrate(ctx context.Context, opts HydrateOptions) (int, error) {
 		if !ok || strings.TrimSpace(action.Href) == "" {
 			return 0, fmt.Errorf("lfs download action missing for oid=%s", oid)
 		}
+		partPath := partFilePath(resumeDir, oid)
+		// If local part is already full-sized, verify hash first so progress is accurate.
+		offset := resumeOffset(partPath, files[0].Size)
+		if files[0].Size > 0 && offset == files[0].Size {
+			gotOID, hashErr := fileSHA256(partPath)
+			if hashErr == nil && strings.EqualFold(gotOID, oid) {
+				downloadCache[oid] = partPath
+				resumedBytes += offset
+				localHitCount++
+				continue
+			}
+			if doneBytes, ok := multipartDoneBytes(partPath, files[0].Size); ok && doneBytes > 0 {
+				offset = doneBytes
+			} else {
+				_ = os.Remove(partPath)
+				_ = os.Remove(multipartStatePath(partPath))
+				offset = 0
+			}
+		}
+
 		tasks = append(tasks, lfsDownloadTask{
 			oid:    oid,
 			size:   files[0].Size,
 			action: action,
 			label:  buildTaskLabel(repoDir, files),
-			part:   partFilePath(resumeDir, oid),
+			part:   partPath,
 		})
-		resumedBytes += resumeOffset(partFilePath(resumeDir, oid), files[0].Size)
+		resumedBytes += offset
 	}
 	progress.add(resumedBytes)
 
 	if opts.ProgressOut != nil {
 		_, _ = fmt.Fprintf(
 			opts.ProgressOut,
-			"Git LFS 待补全文件: %d 个（唯一对象: %d，已续传: %s）\n",
+			"Git LFS 待补全文件: %d 个（唯一对象: %d，本地命中: %d，待下载对象: %d，已续传: %s）\n",
 			len(pointers),
+			len(grouped),
+			localHitCount,
 			len(tasks),
 			formatBytes(resumedBytes),
 		)
 	}
+	progress.start()
+	defer progress.finish()
 
-	if err := runConcurrentDownloads(ctx, client, tasks, token, opts.UserAgent, idleTimeout, progress, downloadCache); err != nil {
+	if err := runConcurrentDownloads(ctx, client, tasks, token, opts.UserAgent, idleTimeout, chunkSize, progress, downloadCache); err != nil {
 		return 0, err
 	}
 
@@ -219,22 +280,17 @@ func Hydrate(ctx context.Context, opts HydrateOptions) (int, error) {
 }
 
 type progressReporter struct {
-	out          io.Writer
-	totalBytes   int64
-	downloaded   atomic.Int64
-	startTime    time.Time
-	done         chan struct{}
-	wg           sync.WaitGroup
-	mu           sync.Mutex
-	lastBytes    int64
-	lastSampleAt time.Time
+	out        io.Writer
+	totalBytes int64
+	bar        *progressbar.ProgressBar
+	mu         sync.Mutex
+	current    atomic.Int64
 }
 
 func newProgressReporter(out io.Writer, totalBytes int64) *progressReporter {
 	return &progressReporter{
 		out:        out,
 		totalBytes: totalBytes,
-		done:       make(chan struct{}),
 	}
 }
 
@@ -242,86 +298,63 @@ func (p *progressReporter) start() {
 	if p.out == nil || p.totalBytes <= 0 {
 		return
 	}
-	p.startTime = time.Now()
-	p.lastSampleAt = p.startTime
-	p.wg.Add(1)
-	go func() {
-		defer p.wg.Done()
-		ticker := time.NewTicker(1 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				p.print(false)
-			case <-p.done:
-				p.print(true)
-				return
-			}
-		}
-	}()
+
+	p.bar = progressbar.NewOptions64(
+		p.totalBytes,
+		progressbar.OptionSetWriter(p.out),
+		progressbar.OptionSetDescription("LFS下载"),
+		progressbar.OptionShowBytes(true),
+		progressbar.OptionShowCount(),
+		progressbar.OptionSetPredictTime(true),
+		progressbar.OptionSetWidth(36),
+		progressbar.OptionSetRenderBlankState(true),
+		progressbar.OptionThrottle(120*time.Millisecond),
+		progressbar.OptionSetTheme(progressbar.Theme{
+			Saucer:        "█",
+			SaucerPadding: "░",
+			SaucerHead:    "▓",
+			BarStart:      "▕",
+			BarEnd:        "▏",
+		}),
+		progressbar.OptionOnCompletion(func() {
+			_, _ = fmt.Fprint(p.out, "\n")
+		}),
+	)
+	_ = p.bar.Set64(p.current.Load())
 }
 
 func (p *progressReporter) add(n int64) {
 	if n == 0 {
 		return
 	}
-	p.downloaded.Add(n)
+	if p.out == nil || p.totalBytes <= 0 {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	next := p.current.Load() + n
+	if next < 0 {
+		next = 0
+	}
+	if next > p.totalBytes {
+		next = p.totalBytes
+	}
+	p.current.Store(next)
+	if p.bar != nil {
+		_ = p.bar.Set64(next)
+	}
 }
 
 func (p *progressReporter) finish() {
 	if p.out == nil || p.totalBytes <= 0 {
 		return
 	}
-	close(p.done)
-	p.wg.Wait()
-}
-
-func (p *progressReporter) print(final bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-
-	now := time.Now()
-	doneBytes := p.downloaded.Load()
-	if doneBytes > p.totalBytes {
-		doneBytes = p.totalBytes
+	if p.bar != nil {
+		_ = p.bar.Finish()
 	}
-
-	deltaBytes := doneBytes - p.lastBytes
-	deltaSec := now.Sub(p.lastSampleAt).Seconds()
-	var speed float64
-	if deltaSec > 0 {
-		speed = float64(deltaBytes) / deltaSec
-	}
-	if speed <= 0 {
-		elapsed := now.Sub(p.startTime).Seconds()
-		if elapsed > 0 {
-			speed = float64(doneBytes) / elapsed
-		}
-	}
-
-	remainBytes := p.totalBytes - doneBytes
-	eta := "-"
-	if speed > 0 && remainBytes > 0 {
-		eta = formatDuration(time.Duration(float64(remainBytes)/speed) * time.Second)
-	}
-
-	percent := float64(doneBytes) * 100 / float64(p.totalBytes)
-	line := fmt.Sprintf(
-		"\rLFS下载进度: %6.2f%%  %s/%s  速度 %s/s  剩余 %s  预计 %s",
-		percent,
-		formatBytes(doneBytes),
-		formatBytes(p.totalBytes),
-		formatBytes(int64(speed)),
-		formatBytes(remainBytes),
-		eta,
-	)
-	if final {
-		line += "\n"
-	}
-	_, _ = fmt.Fprint(p.out, line)
-
-	p.lastBytes = doneBytes
-	p.lastSampleAt = now
 }
 
 func (p *progressReporter) logDownloading(label string) {
@@ -330,7 +363,13 @@ func (p *progressReporter) logDownloading(label string) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	_, _ = fmt.Fprintf(p.out, "\r正在下载: %s\n", label)
+	if p.bar != nil {
+		_ = p.bar.Clear()
+	}
+	_, _ = fmt.Fprintf(p.out, "正在下载: %s\n", label)
+	if p.bar != nil {
+		_ = p.bar.Set64(p.current.Load())
+	}
 }
 
 func (p *progressReporter) logRetry(label string, attempt int, wait time.Duration, err error) {
@@ -339,6 +378,9 @@ func (p *progressReporter) logRetry(label string, attempt int, wait time.Duratio
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.bar != nil {
+		_ = p.bar.Clear()
+	}
 	_, _ = fmt.Fprintf(
 		p.out,
 		"下载重试(%d): %s, 原因: %s, 等待 %s\n",
@@ -347,6 +389,24 @@ func (p *progressReporter) logRetry(label string, attempt int, wait time.Duratio
 		classifyRetryReason(err),
 		formatDuration(wait),
 	)
+	if p.bar != nil {
+		_ = p.bar.Set64(p.current.Load())
+	}
+}
+
+func (p *progressReporter) logLocalHit(label string) {
+	if p.out == nil || strings.TrimSpace(label) == "" {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.bar != nil {
+		_ = p.bar.Clear()
+	}
+	_, _ = fmt.Fprintf(p.out, "本地断点已完整: %s（跳过网络下载）\n", label)
+	if p.bar != nil {
+		_ = p.bar.Set64(p.current.Load())
+	}
 }
 
 func runConcurrentDownloads(
@@ -355,6 +415,7 @@ func runConcurrentDownloads(
 	tasks []lfsDownloadTask,
 	token, userAgent string,
 	idleTimeout time.Duration,
+	chunkSize int64,
 	progress *progressReporter,
 	downloadCache map[string]string,
 ) error {
@@ -384,9 +445,6 @@ func runConcurrentDownloads(
 			if err := ctx.Err(); err != nil {
 				return
 			}
-			if progress != nil {
-				progress.logDownloading(task.label)
-			}
 			tmpPath, err := downloadObjectWithRetry(
 				ctx,
 				client,
@@ -397,6 +455,7 @@ func runConcurrentDownloads(
 				token,
 				userAgent,
 				idleTimeout,
+				chunkSize,
 				task.label,
 				progress,
 			)
@@ -453,6 +512,7 @@ func downloadObjectWithRetry(
 	partPath string,
 	token, userAgent string,
 	idleTimeout time.Duration,
+	chunkSize int64,
 	label string,
 	progress *progressReporter,
 ) (string, error) {
@@ -460,7 +520,7 @@ func downloadObjectWithRetry(
 	backoff := lfsBackoffBase
 
 	for attempt := 1; attempt <= lfsMaxRetries; attempt++ {
-		tmpPath, err := downloadObject(ctx, client, action, wantOID, wantSize, partPath, token, userAgent, idleTimeout, progress)
+		tmpPath, err := downloadObject(ctx, client, action, wantOID, wantSize, partPath, token, userAgent, idleTimeout, chunkSize, label, progress)
 		if err == nil {
 			return tmpPath, nil
 		}
@@ -629,6 +689,8 @@ func requestBatch(
 	client *http.Client,
 	batchURL, userAgent, token string,
 	objects []batchRequestObject,
+	debugBatch bool,
+	debugOut io.Writer,
 ) (map[string]batchResponseObject, error) {
 	body := batchRequest{
 		Operation: batchOpDownload,
@@ -661,6 +723,9 @@ func requestBatch(
 	if err != nil {
 		return nil, fmt.Errorf("read lfs batch response: %w", err)
 	}
+	if debugBatch {
+		printBatchDebug(debugOut, resp.StatusCode, respBody)
+	}
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("lfs batch http status %d body=%s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
@@ -677,6 +742,75 @@ func requestBatch(
 	return out, nil
 }
 
+func applyDownloadURLOverride(resp map[string]batchResponseObject, overrideBase string, debug bool, debugOut io.Writer) error {
+	overrideBase = strings.TrimSpace(overrideBase)
+	if overrideBase == "" {
+		return nil
+	}
+	for oid, obj := range resp {
+		action, ok := obj.Actions[batchOpDownload]
+		if !ok || strings.TrimSpace(action.Href) == "" {
+			continue
+		}
+		original := action.Href
+		rewritten, err := rewriteDownloadURL(action.Href, overrideBase)
+		if err != nil {
+			return fmt.Errorf("rewrite lfs download url for oid=%s: %w", oid, err)
+		}
+		action.Href = rewritten
+		obj.Actions[batchOpDownload] = action
+		resp[oid] = obj
+		if debug && debugOut != nil && rewritten != original {
+			_, _ = fmt.Fprintf(debugOut, "[DEBUG] LFS download URL overridden oid=%s\n[DEBUG] after: %s\n", oid, rewritten)
+		}
+	}
+	return nil
+}
+
+func rewriteDownloadURL(rawDownloadURL, overrideBase string) (string, error) {
+	downloadURL, err := url.Parse(strings.TrimSpace(rawDownloadURL))
+	if err != nil {
+		return "", fmt.Errorf("parse original download url: %w", err)
+	}
+	if downloadURL.Scheme == "" || downloadURL.Host == "" {
+		return "", fmt.Errorf("original download url must include scheme and host: %q", rawDownloadURL)
+	}
+
+	overrideURL, err := url.Parse(strings.TrimSpace(overrideBase))
+	if err != nil {
+		return "", fmt.Errorf("parse override url: %w", err)
+	}
+	if overrideURL.Scheme == "" || overrideURL.Host == "" {
+		return "", fmt.Errorf("override url must include scheme and host: %q", overrideBase)
+	}
+
+	downloadURL.Scheme = overrideURL.Scheme
+	downloadURL.Host = overrideURL.Host
+	downloadURL.User = overrideURL.User
+	if strings.TrimSpace(overrideURL.Path) != "" && overrideURL.Path != "/" {
+		downloadURL.Path = "/" + strings.TrimPrefix(pathpkg.Join(overrideURL.Path, downloadURL.Path), "/")
+	}
+	return downloadURL.String(), nil
+}
+
+func printBatchDebug(out io.Writer, statusCode int, body []byte) {
+	if out == nil {
+		return
+	}
+	_, _ = fmt.Fprintf(out, "[DEBUG] LFS Batch API status=%d\n", statusCode)
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		_, _ = fmt.Fprintln(out, "[DEBUG] LFS Batch API body=<empty>")
+		return
+	}
+	var pretty bytes.Buffer
+	if err := json.Indent(&pretty, trimmed, "", "  "); err == nil {
+		_, _ = fmt.Fprintf(out, "[DEBUG] LFS Batch API body:\n%s\n", pretty.String())
+		return
+	}
+	_, _ = fmt.Fprintf(out, "[DEBUG] LFS Batch API body:\n%s\n", string(trimmed))
+}
+
 func downloadObject(
 	ctx context.Context,
 	client *http.Client,
@@ -686,9 +820,44 @@ func downloadObject(
 	partPath string,
 	token, userAgent string,
 	idleTimeout time.Duration,
+	chunkSize int64,
+	label string,
 	progress *progressReporter,
 ) (string, error) {
 	offset := resumeOffset(partPath, wantSize)
+	if wantSize > 0 && offset == wantSize {
+		gotOID, err := fileSHA256(partPath)
+		if err == nil && strings.EqualFold(gotOID, wantOID) {
+			if progress != nil {
+				progress.logLocalHit(label)
+			}
+			return partPath, nil
+		}
+		if doneBytes, ok := multipartDoneBytes(partPath, wantSize); ok {
+			if progress != nil && offset > doneBytes {
+				progress.add(-(offset - doneBytes))
+			}
+			offset = 0
+		} else {
+			if progress != nil && offset > 0 {
+				progress.add(-offset)
+			}
+			_ = os.Remove(partPath)
+			_ = os.Remove(multipartStatePath(partPath))
+			offset = 0
+		}
+	}
+	if offset == 0 && wantSize >= lfsChunkMinSize {
+		if ok, _ := supportsRangeDownload(ctx, client, action, token, userAgent); ok {
+			if progress != nil {
+				progress.logDownloading(label + "（分块并发）")
+			}
+			return downloadObjectMultipart(ctx, client, action, wantOID, wantSize, partPath, token, userAgent, idleTimeout, chunkSize, progress)
+		}
+	}
+	if progress != nil {
+		progress.logDownloading(label)
+	}
 
 	reqCtx, cancelReq := context.WithCancel(ctx)
 	defer cancelReq()
@@ -829,6 +998,413 @@ func downloadObject(
 	return partPath, nil
 }
 
+func supportsRangeDownload(
+	ctx context.Context,
+	client *http.Client,
+	action batchAction,
+	token, userAgent string,
+) (bool, error) {
+	probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, action.Href, nil)
+	if err != nil {
+		return false, err
+	}
+	applyActionHeaders(req, action, token, userAgent)
+	req.Header.Set("Range", "bytes=0-0")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return false, err
+		}
+		return false, nil
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 8*1024))
+	return resp.StatusCode == http.StatusPartialContent, nil
+}
+
+func downloadObjectMultipart(
+	ctx context.Context,
+	client *http.Client,
+	action batchAction,
+	wantOID string,
+	wantSize int64,
+	partPath string,
+	token, userAgent string,
+	idleTimeout time.Duration,
+	chunkSize int64,
+	progress *progressReporter,
+) (string, error) {
+	if err := os.MkdirAll(filepath.Dir(partPath), 0o755); err != nil {
+		return "", fmt.Errorf("create lfs part dir: %w", err)
+	}
+	statePath := multipartStatePath(partPath)
+	if chunkSize <= 0 {
+		chunkSize = lfsChunkSize
+	}
+	chunks := buildChunks(wantSize, chunkSize)
+	state, err := loadOrInitMultipartState(statePath, wantSize, chunkSize, len(chunks))
+	if err != nil {
+		return "", err
+	}
+
+	needResetFile := false
+	if info, err := os.Stat(partPath); err == nil {
+		if info.Size() != wantSize {
+			needResetFile = true
+		}
+	} else if os.IsNotExist(err) {
+		needResetFile = true
+	} else {
+		return "", fmt.Errorf("stat lfs part file: %w", err)
+	}
+	if len(state.Done) != len(chunks) {
+		needResetFile = true
+		state.Done = make([]bool, len(chunks))
+	}
+
+	flags := os.O_CREATE | os.O_RDWR
+	if needResetFile {
+		flags |= os.O_TRUNC
+	}
+	f, err := os.OpenFile(partPath, flags, 0o644)
+	if err != nil {
+		return "", fmt.Errorf("open lfs part file: %w", err)
+	}
+	if needResetFile {
+		if err := f.Truncate(wantSize); err != nil {
+			_ = f.Close()
+			return "", fmt.Errorf("truncate lfs part file: %w", err)
+		}
+		if err := saveMultipartState(statePath, state); err != nil {
+			_ = f.Close()
+			return "", err
+		}
+	}
+	if err := f.Close(); err != nil {
+		return "", fmt.Errorf("close lfs part file: %w", err)
+	}
+
+	// Reload state after potential reset write.
+	state, err = loadOrInitMultipartState(statePath, wantSize, chunkSize, len(chunks))
+	if err != nil {
+		return "", err
+	}
+	if len(state.Done) != len(chunks) {
+		state.Done = make([]bool, len(chunks))
+		if err := saveMultipartState(statePath, state); err != nil {
+			return "", err
+		}
+	}
+
+	var alreadyDoneBytes int64
+	for i := range chunks {
+		if state.Done[i] {
+			alreadyDoneBytes += chunks[i].end - chunks[i].start + 1
+		}
+	}
+	if alreadyDoneBytes > wantSize {
+		alreadyDoneBytes = 0
+		state.Done = make([]bool, len(chunks))
+		if err := saveMultipartState(statePath, state); err != nil {
+			return "", err
+		}
+	}
+
+	if progress != nil && alreadyDoneBytes > 0 {
+		progress.add(alreadyDoneBytes)
+	}
+
+	if len(chunks) == 0 {
+		return partPath, nil
+	}
+
+	if alreadyDoneBytes == wantSize {
+		gotOID, hashErr := fileSHA256(partPath)
+		if hashErr == nil && strings.EqualFold(gotOID, wantOID) {
+			_ = os.Remove(statePath)
+			return partPath, nil
+		}
+		state.Done = make([]bool, len(chunks))
+		if err := saveMultipartState(statePath, state); err != nil {
+			return "", err
+		}
+		if f, err := os.OpenFile(partPath, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o644); err == nil {
+			_ = f.Truncate(wantSize)
+			_ = f.Close()
+		}
+		if progress != nil && alreadyDoneBytes > 0 {
+			progress.add(-alreadyDoneBytes)
+		}
+	}
+
+	workerN := lfsChunkWorkers
+	if workerN > len(chunks) {
+		workerN = len(chunks)
+	}
+	if workerN <= 0 {
+		workerN = 1
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	chunkCh := make(chan rangeChunk)
+	var firstErr atomic.Value
+	var wg sync.WaitGroup
+	var stateMu sync.Mutex
+
+	worker := func() {
+		defer wg.Done()
+		for ch := range chunkCh {
+			if ctx.Err() != nil {
+				return
+			}
+			if err := downloadChunkWithRetry(ctx, client, action, token, userAgent, idleTimeout, partPath, ch, progress); err != nil {
+				if firstErr.Load() == nil {
+					firstErr.Store(err)
+					cancel()
+				}
+				return
+			}
+			stateMu.Lock()
+			state.Done[ch.idx] = true
+			saveErr := saveMultipartState(statePath, state)
+			stateMu.Unlock()
+			if saveErr != nil {
+				if firstErr.Load() == nil {
+					firstErr.Store(saveErr)
+					cancel()
+				}
+				return
+			}
+		}
+	}
+	for i := 0; i < workerN; i++ {
+		wg.Add(1)
+		go worker()
+	}
+
+loop:
+	for _, ch := range chunks {
+		if state.Done[ch.idx] {
+			continue
+		}
+		if firstErr.Load() != nil {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			break loop
+		case chunkCh <- ch:
+		}
+	}
+	close(chunkCh)
+	wg.Wait()
+
+	if v := firstErr.Load(); v != nil {
+		if e, ok := v.(error); ok {
+			return "", e
+		}
+		return "", fmt.Errorf("multipart lfs download failed")
+	}
+	if err := ctx.Err(); err != nil && err != context.Canceled {
+		return "", err
+	}
+
+	gotOID, hashErr := fileSHA256(partPath)
+	if hashErr != nil {
+		return "", fmt.Errorf("hash lfs object oid=%s: %w", wantOID, hashErr)
+	}
+	if !strings.EqualFold(gotOID, wantOID) {
+		if progress != nil {
+			progress.add(-wantSize)
+		}
+		_ = os.Remove(partPath)
+		_ = os.Remove(statePath)
+		return "", fmt.Errorf("lfs object hash mismatch want=%s got=%s", wantOID, gotOID)
+	}
+	_ = os.Remove(statePath)
+	return partPath, nil
+}
+
+func downloadChunkWithRetry(
+	ctx context.Context,
+	client *http.Client,
+	action batchAction,
+	token, userAgent string,
+	idleTimeout time.Duration,
+	partPath string,
+	ch rangeChunk,
+	progress *progressReporter,
+) error {
+	var lastErr error
+	backoff := lfsBackoffBase
+	for attempt := 1; attempt <= lfsMaxRetries; attempt++ {
+		if err := downloadChunk(ctx, client, action, token, userAgent, idleTimeout, partPath, ch, progress); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		if ctx.Err() != nil || attempt == lfsMaxRetries {
+			break
+		}
+		wait := backoff
+		if wait > lfsBackoffMax {
+			wait = lfsBackoffMax
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+		backoff *= 2
+	}
+	return lastErr
+}
+
+func downloadChunk(
+	ctx context.Context,
+	client *http.Client,
+	action batchAction,
+	token, userAgent string,
+	idleTimeout time.Duration,
+	partPath string,
+	ch rangeChunk,
+	progress *progressReporter,
+) error {
+	reqCtx, cancelReq := context.WithCancel(ctx)
+	defer cancelReq()
+	var idleTriggered atomic.Bool
+	var lastReadAt atomic.Int64
+	lastReadAt.Store(time.Now().UnixNano())
+	stopWatchdog := make(chan struct{})
+	defer close(stopWatchdog)
+
+	if idleTimeout > 0 {
+		go func() {
+			t := time.NewTicker(1 * time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-stopWatchdog:
+					return
+				case <-reqCtx.Done():
+					return
+				case <-t.C:
+					last := time.Unix(0, lastReadAt.Load())
+					if time.Since(last) > idleTimeout {
+						idleTriggered.Store(true)
+						cancelReq()
+						return
+					}
+				}
+			}
+		}()
+	}
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, action.Href, nil)
+	if err != nil {
+		return err
+	}
+	applyActionHeaders(req, action, token, userAgent)
+	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", ch.start, ch.end))
+
+	resp, err := client.Do(req)
+	if err != nil {
+		if idleTriggered.Load() {
+			return fmt.Errorf("idle timeout: no data received for %s", idleTimeout)
+		}
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusPartialContent {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4*1024))
+		return fmt.Errorf("range download failed: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	f, err := os.OpenFile(partPath, os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	writer := &fileOffsetWriter{
+		f:      f,
+		offset: ch.start,
+	}
+	n, copyErr := io.Copy(writer, &progressReader{
+		r: resp.Body,
+		onRead: func(n int64) {
+			lastReadAt.Store(time.Now().UnixNano())
+			if progress != nil {
+				progress.add(n)
+			}
+		},
+	})
+	if copyErr != nil {
+		if progress != nil && n > 0 {
+			progress.add(-n)
+		}
+		return copyErr
+	}
+	expected := ch.end - ch.start + 1
+	if n != expected {
+		if progress != nil {
+			progress.add(-n)
+		}
+		return fmt.Errorf("range chunk size mismatch expected=%d got=%d", expected, n)
+	}
+	return nil
+}
+
+func buildChunks(total, chunkSize int64) []rangeChunk {
+	if total <= 0 {
+		return nil
+	}
+	if chunkSize <= 0 {
+		chunkSize = total
+	}
+	var out []rangeChunk
+	for i, start := 0, int64(0); start < total; i, start = i+1, start+chunkSize {
+		end := start + chunkSize - 1
+		if end >= total {
+			end = total - 1
+		}
+		out = append(out, rangeChunk{idx: i, start: start, end: end})
+	}
+	return out
+}
+
+func applyActionHeaders(req *http.Request, action batchAction, token, userAgent string) {
+	if strings.TrimSpace(userAgent) != "" {
+		req.Header.Set("User-Agent", userAgent)
+	}
+	for k, v := range action.Header {
+		if strings.TrimSpace(k) != "" {
+			req.Header.Set(k, v)
+		}
+	}
+	if req.Header.Get("Authorization") == "" {
+		req.Header.Set("Authorization", "Basic "+basicAuth("oauth2", token))
+	}
+}
+
+type fileOffsetWriter struct {
+	f      *os.File
+	offset int64
+}
+
+func (w *fileOffsetWriter) Write(p []byte) (int, error) {
+	n, err := w.f.WriteAt(p, w.offset)
+	w.offset += int64(n)
+	return n, err
+}
+
 func replacePointerFile(src, dst string, mode fs.FileMode) error {
 	srcFile, err := os.Open(src)
 	if err != nil {
@@ -872,6 +1448,10 @@ func partFilePath(resumeDir, oid string) string {
 	return filepath.Join(resumeDir, oid+".part")
 }
 
+func multipartStatePath(partPath string) string {
+	return partPath + ".state.json"
+}
+
 func resumeOffset(partPath string, wantSize int64) int64 {
 	info, err := os.Stat(partPath)
 	if err != nil {
@@ -906,6 +1486,79 @@ func isHashMismatchError(err error) bool {
 		return false
 	}
 	return strings.Contains(strings.ToLower(err.Error()), "hash mismatch")
+}
+
+func loadOrInitMultipartState(path string, size, chunkSize int64, chunkCount int) (*multipartState, error) {
+	st, err := loadMultipartState(path)
+	if err == nil {
+		if st.Size == size && st.ChunkSize == chunkSize && len(st.Done) == chunkCount {
+			return st, nil
+		}
+	}
+	st = &multipartState{
+		Size:      size,
+		ChunkSize: chunkSize,
+		Done:      make([]bool, chunkCount),
+	}
+	if err := saveMultipartState(path, st); err != nil {
+		return nil, err
+	}
+	return st, nil
+}
+
+func loadMultipartState(path string) (*multipartState, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var st multipartState
+	if err := json.Unmarshal(b, &st); err != nil {
+		return nil, err
+	}
+	return &st, nil
+}
+
+func saveMultipartState(path string, st *multipartState) error {
+	b, err := json.Marshal(st)
+	if err != nil {
+		return fmt.Errorf("marshal multipart state: %w", err)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		return fmt.Errorf("write multipart state temp: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("replace multipart state file: %w", err)
+	}
+	return nil
+}
+
+func multipartDoneBytes(partPath string, wantSize int64) (int64, bool) {
+	statePath := multipartStatePath(partPath)
+	st, err := loadMultipartState(statePath)
+	if err != nil {
+		return 0, false
+	}
+	if st.Size != wantSize || st.ChunkSize <= 0 {
+		return 0, false
+	}
+	chunks := buildChunks(wantSize, st.ChunkSize)
+	if len(chunks) == 0 || len(st.Done) != len(chunks) {
+		return 0, false
+	}
+	var doneBytes int64
+	for i := 0; i < len(chunks); i++ {
+		if st.Done[i] {
+			doneBytes += chunks[i].end - chunks[i].start + 1
+		}
+	}
+	if doneBytes <= 0 {
+		return 0, true
+	}
+	if doneBytes > wantSize {
+		doneBytes = wantSize
+	}
+	return doneBytes, true
 }
 
 type progressReader struct {

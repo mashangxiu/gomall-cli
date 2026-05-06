@@ -1,7 +1,10 @@
 package cmd
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	pathpkg "path"
@@ -12,6 +15,8 @@ import (
 	"time"
 
 	gogit "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing/filemode"
+	"github.com/go-git/go-git/v5/plumbing/object"
 	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 	"github.com/spf13/cobra"
 
@@ -147,6 +152,7 @@ func newModelCreatedCmd() *cobra.Command {
 func newModelCloneCmd() *cobra.Command {
 	var into string
 	var dir string
+	var debugLFSBatch bool
 
 	cmd := &cobra.Command{
 		Use:   "clone 作者/名称|ID",
@@ -219,6 +225,13 @@ func newModelCloneCmd() *cobra.Command {
 
 			if resumeMode {
 				fmt.Printf("目标目录已存在，进入断点续传模式: %s\n", targetDir)
+				if err := syncResumableRepo(cmd.Context(), targetDir, &githttp.BasicAuth{
+					Username: "oauth2",
+					Password: gitlabToken,
+				}, cmd.OutOrStdout()); err != nil {
+					ctx.Logger.Error("sync existing repo failed", "error", err, "target_dir", targetDir)
+					return clierr.New(clierr.CodeRuntime, "补全普通 Git 文件失败："+err.Error())
+				}
 			} else {
 				fmt.Printf("开始克隆: %s\n", repoURL)
 				fmt.Printf("目标目录: %s\n", targetDir)
@@ -235,14 +248,18 @@ func newModelCloneCmd() *cobra.Command {
 
 			fmt.Println("开始补全 Git LFS 大文件...")
 			hydrated, err := gitlfs.Hydrate(cmd.Context(), gitlfs.HydrateOptions{
-				RepoDir:     targetDir,
-				RepoURL:     repoURL,
-				Token:       gitlabToken,
-				UserAgent:   ctx.Config.API.UserAgent,
-				Insecure:    ctx.Config.API.Insecure,
-				HTTPTimeout: ctx.Config.API.LFSTimeout,
-				IdleTimeout: ctx.Config.API.LFSIdleTimeout,
-				ProgressOut: cmd.OutOrStdout(),
+				RepoDir:             targetDir,
+				RepoURL:             repoURL,
+				Token:               gitlabToken,
+				UserAgent:           ctx.Config.API.UserAgent,
+				Insecure:            ctx.Config.API.Insecure,
+				HTTPTimeout:         ctx.Config.API.LFSTimeout,
+				IdleTimeout:         ctx.Config.API.LFSIdleTimeout,
+				ChunkSize:           int64(ctx.Config.API.LFSChunkSizeMB) * 1024 * 1024,
+				DownloadURLOverride: ctx.Config.API.LFSDownloadURLOverride,
+				ProgressOut:         cmd.OutOrStdout(),
+				DebugBatch:          debugLFSBatch,
+				DebugOut:            cmd.ErrOrStderr(),
 			})
 			if err != nil {
 				ctx.Logger.Error("git lfs hydrate failed", "error", err, "repo_url", repoURL, "target_dir", targetDir)
@@ -262,6 +279,7 @@ func newModelCloneCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&into, "into", ".", "parent directory to place cloned repository")
 	cmd.Flags().StringVar(&dir, "dir", "", "explicit target directory, overrides --into")
+	cmd.Flags().BoolVar(&debugLFSBatch, "debug-lfs-batch", false, "print raw LFS Batch API response for debugging")
 	return cmd
 }
 
@@ -409,6 +427,100 @@ func sameRepoURL(a, b string) bool {
 		return s
 	}
 	return normalize(a) == normalize(b)
+}
+
+func syncResumableRepo(ctx context.Context, targetDir string, auth *githttp.BasicAuth, out io.Writer) error {
+	repo, err := gogit.PlainOpen(targetDir)
+	if err != nil {
+		return fmt.Errorf("open repo: %w", err)
+	}
+
+	if out != nil {
+		fmt.Fprintln(out, "开始补全普通 Git 文件...")
+	}
+
+	fetchErr := repo.FetchContext(ctx, &gogit.FetchOptions{
+		RemoteName: gogit.DefaultRemoteName,
+		Auth:       auth,
+		Progress:   out,
+		Force:      true,
+		Tags:       gogit.NoTags,
+	})
+	if fetchErr != nil && !errors.Is(fetchErr, gogit.NoErrAlreadyUpToDate) {
+		return fmt.Errorf("fetch failed: %w", fetchErr)
+	}
+
+	head, err := repo.Head()
+	if err != nil {
+		return fmt.Errorf("read head: %w", err)
+	}
+	commit, err := repo.CommitObject(head.Hash())
+	if err != nil {
+		return fmt.Errorf("load head commit: %w", err)
+	}
+	tree, err := commit.Tree()
+	if err != nil {
+		return fmt.Errorf("load head tree: %w", err)
+	}
+	restored, err := restoreMissingTrackedFiles(targetDir, tree)
+	if err != nil {
+		return fmt.Errorf("restore missing tracked files: %w", err)
+	}
+
+	if out != nil {
+		fmt.Fprintf(out, "普通 Git 文件补全完成（恢复 %d 个缺失文件）\n", restored)
+	}
+	return nil
+}
+
+func restoreMissingTrackedFiles(repoDir string, tree *object.Tree) (int, error) {
+	if tree == nil {
+		return 0, fmt.Errorf("nil tree")
+	}
+	restored := 0
+	err := tree.Files().ForEach(func(f *object.File) error {
+		if f == nil {
+			return nil
+		}
+		absPath := filepath.Join(repoDir, filepath.FromSlash(f.Name))
+		if _, err := os.Lstat(absPath); err == nil {
+			return nil
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+
+		if err := os.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
+			return err
+		}
+		content, err := f.Contents()
+		if err != nil {
+			return err
+		}
+
+		switch f.Mode {
+		case filemode.Symlink:
+			if err := os.Symlink(content, absPath); err != nil && !os.IsExist(err) {
+				return err
+			}
+		default:
+			perm := os.FileMode(0o644)
+			if f.Mode == filemode.Executable {
+				perm = 0o755
+			}
+			if err := os.WriteFile(absPath, []byte(content), perm); err != nil {
+				return err
+			}
+			if err := os.Chmod(absPath, perm); err != nil {
+				return err
+			}
+		}
+		restored++
+		return nil
+	})
+	if err != nil {
+		return restored, err
+	}
+	return restored, nil
 }
 
 func tryParsePositiveInt64(raw string) (int64, bool) {
