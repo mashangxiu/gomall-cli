@@ -117,6 +117,21 @@ func TestCloneAcceptsIDInput(t *testing.T) {
 	}
 }
 
+func TestUploadExistingModelRefParsing(t *testing.T) {
+	t.Parallel()
+
+	if id, ok := tryParsePositiveInt64("2546"); !ok || id != 2546 {
+		t.Fatalf("upload model id parse failed: (%d, %t)", id, ok)
+	}
+	author, name, err := splitModelRef("gomall/demomodel")
+	if err != nil {
+		t.Fatalf("splitModelRef() error = %v", err)
+	}
+	if author != "gomall" || name != "demomodel" {
+		t.Fatalf("splitModelRef() = %q/%q", author, name)
+	}
+}
+
 func TestVisibilityText(t *testing.T) {
 	t.Parallel()
 

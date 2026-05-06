@@ -36,6 +36,7 @@ type APIConfig struct {
 	LFSIdleTimeout         time.Duration
 	LFSChunkSizeMB         int
 	LFSDownloadURLOverride string
+	LFSUploadURLOverride   string
 	Insecure               bool
 	UserAgent              string
 }
@@ -61,6 +62,7 @@ func init() {
 	globalViper.SetDefault("api-lfs-idle-timeout", "2m")
 	globalViper.SetDefault("api-lfs-chunk-size-mb", 64)
 	globalViper.SetDefault("api-lfs-download-url-override", "")
+	globalViper.SetDefault("api-lfs-upload-url-override", "")
 	globalViper.SetDefault("api-insecure", false)
 	globalViper.SetDefault("api-user-agent", "gomall-cli/0.1.0")
 
@@ -80,6 +82,7 @@ func BindPFlags(flags *pflag.FlagSet) error {
 		"api-lfs-idle-timeout",
 		"api-lfs-chunk-size-mb",
 		"api-lfs-download-url-override",
+		"api-lfs-upload-url-override",
 		"api-insecure",
 		"api-user-agent",
 		"auth-login-path",
@@ -139,6 +142,7 @@ func Load(cmd *cobra.Command, cfgFile string) (Config, error) {
 			LFSIdleTimeout:         globalViper.GetDuration("api-lfs-idle-timeout"),
 			LFSChunkSizeMB:         globalViper.GetInt("api-lfs-chunk-size-mb"),
 			LFSDownloadURLOverride: strings.TrimSpace(globalViper.GetString("api-lfs-download-url-override")),
+			LFSUploadURLOverride:   strings.TrimSpace(globalViper.GetString("api-lfs-upload-url-override")),
 			Insecure:               globalViper.GetBool("api-insecure"),
 			UserAgent:              globalViper.GetString("api-user-agent"),
 		},
@@ -193,15 +197,13 @@ func validate(cfg Config) error {
 		return fmt.Errorf("api-lfs-chunk-size-mb must be > 0")
 	}
 	if cfg.API.LFSDownloadURLOverride != "" {
-		overrideURL, err := url.Parse(cfg.API.LFSDownloadURLOverride)
-		if err != nil {
-			return fmt.Errorf("invalid api-lfs-download-url-override %q: %w", cfg.API.LFSDownloadURLOverride, err)
+		if err := validateOverrideURL("api-lfs-download-url-override", cfg.API.LFSDownloadURLOverride); err != nil {
+			return err
 		}
-		if overrideURL.Scheme == "" || overrideURL.Host == "" {
-			return fmt.Errorf(
-				"api-lfs-download-url-override must include scheme and host, got %q",
-				cfg.API.LFSDownloadURLOverride,
-			)
+	}
+	if cfg.API.LFSUploadURLOverride != "" {
+		if err := validateOverrideURL("api-lfs-upload-url-override", cfg.API.LFSUploadURLOverride); err != nil {
+			return err
 		}
 	}
 
@@ -213,6 +215,17 @@ func validate(cfg Config) error {
 	}
 	if strings.TrimSpace(cfg.Auth.SessionFile) == "" {
 		return fmt.Errorf("auth-session-file cannot be empty")
+	}
+	return nil
+}
+
+func validateOverrideURL(name, value string) error {
+	overrideURL, err := url.Parse(value)
+	if err != nil {
+		return fmt.Errorf("invalid %s %q: %w", name, value, err)
+	}
+	if overrideURL.Scheme == "" || overrideURL.Host == "" {
+		return fmt.Errorf("%s must include scheme and host, got %q", name, value)
 	}
 	return nil
 }

@@ -53,6 +53,12 @@ go run . model created --name qwen
 go run . model create --name demomodel
 go run . model create --name demomodel --visibility 5
 
+# create model from a local folder and upload files (requires login first)
+go run . model upload ./demomodel
+go run . model upload ./demomodel --visibility 5 --large-file-threshold-mb 10
+go run . model upload ./demomodel --model 2546
+go run . model upload ./demomodel --model gomall/demomodel
+
 # delete model by id (requires login first)
 go run . model delete 2546
 
@@ -69,6 +75,7 @@ go run . model clone 1700
 After login, CLI stores `token / expireTime / username / gitlabToken / gitlabId` in local session file.
 `gitlabToken` is fetched from `/goMallApi/api/users/get_current_user` right after login, and `model clone` uses it for Git authentication.
 After clone, CLI will automatically hydrate Git LFS pointer files with concurrent download + retry (exponential backoff), and show real-time progress (speed / remaining / ETA). If server supports HTTP Range, large files are downloaded in parallel chunks.
+Model upload uses pure Go Git/LFS implementations and does not require local `git` or `git-lfs` commands.
 Session file is encrypted with AES-256-GCM.
 Session key is always machine-derived.
 Machine-derived secret supports macOS / Linux / Windows.
@@ -91,6 +98,7 @@ Default session file:
 --api-lfs-idle-timeout duration
 --api-lfs-chunk-size-mb int
 --api-lfs-download-url-override string
+--api-lfs-upload-url-override string
 --api-insecure
 --api-user-agent string
 --auth-login-path string
@@ -111,6 +119,7 @@ All env vars use `GOMALL_` prefix.
 - `GOMALL_API_LFS_IDLE_TIMEOUT`
 - `GOMALL_API_LFS_CHUNK_SIZE_MB`
 - `GOMALL_API_LFS_DOWNLOAD_URL_OVERRIDE`
+- `GOMALL_API_LFS_UPLOAD_URL_OVERRIDE`
 - `GOMALL_API_INSECURE`
 - `GOMALL_API_USER_AGENT`
 - `GOMALL_AUTH_LOGIN_PATH`
@@ -126,3 +135,13 @@ api-lfs-download-url-override: "http://my.host.cn"
 ```
 
 Then `download.href` will be rewritten as `http://my.host.cn/lfs-objects/...` while keeping original query params/signature.
+
+## LFS Upload URL Override
+
+Upload URL override is controlled separately from download URL override:
+
+```yaml
+api-lfs-upload-url-override: "http://my.upload-host.cn"
+```
+
+Then `upload.href` will be rewritten during `model upload`. This does not affect `model clone`.

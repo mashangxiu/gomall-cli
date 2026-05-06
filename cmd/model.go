@@ -25,6 +25,7 @@ import (
 	"gomall-cli/internal/clierr"
 	"gomall-cli/internal/gitlfs"
 	"gomall-cli/internal/model"
+	"gomall-cli/internal/modelupload"
 )
 
 func newModelCmd() *cobra.Command {
@@ -37,6 +38,7 @@ func newModelCmd() *cobra.Command {
 	modelCmd.AddCommand(newModelCreatedCmd())
 	modelCmd.AddCommand(newModelCreateCmd())
 	modelCmd.AddCommand(newModelDeleteCmd())
+	modelCmd.AddCommand(newModelUploadCmd())
 	modelCmd.AddCommand(newModelCloneCmd())
 	modelCmd.AddCommand(newModelDetailCmd())
 	return modelCmd
@@ -269,6 +271,277 @@ func newModelDeleteCmd() *cobra.Command {
 
 	cmd.Flags().BoolVar(&yes, "yes", false, "skip interactive confirmation")
 	return cmd
+}
+
+func newModelUploadCmd() *cobra.Command {
+	var cnName string
+	var license string
+	var description string
+	var visibility int
+	var taskIDs string
+	var thresholdMB int
+	var branch string
+	var modelRef string
+	var debug bool
+	var replaceIfExists bool
+	var useIfExists bool
+
+	cmd := &cobra.Command{
+		Use:   "upload FOLDER",
+		Short: "Upload a local folder to a new or existing model repository",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			folder := strings.TrimSpace(args[0])
+			if folder == "" {
+				return clierr.New(clierr.CodeInvalidInput, "参数错误：FOLDER 不能为空")
+			}
+			if visibility != 1 && visibility != 5 {
+				return clierr.New(clierr.CodeInvalidInput, "参数错误：--visibility 仅支持 1(私有) 或 5(公开)")
+			}
+			if thresholdMB <= 0 {
+				return clierr.New(clierr.CodeInvalidInput, "参数错误：--large-file-threshold-mb 必须大于 0")
+			}
+			if replaceIfExists && useIfExists {
+				return clierr.New(clierr.CodeInvalidInput, "参数错误：--replace-if-exists 和 --use-if-exists 不能同时使用")
+			}
+
+			absFolder, err := filepath.Abs(folder)
+			if err != nil {
+				return clierr.New(clierr.CodeInvalidInput, "解析目录失败："+err.Error())
+			}
+			stat, err := os.Stat(absFolder)
+			if err != nil {
+				return clierr.New(clierr.CodeInvalidInput, "读取目录失败："+err.Error())
+			}
+			if !stat.IsDir() {
+				return clierr.New(clierr.CodeInvalidInput, "参数错误：FOLDER 必须是目录")
+			}
+			name := filepath.Base(absFolder)
+			if strings.TrimSpace(name) == "" || name == "." || name == string(filepath.Separator) {
+				return clierr.New(clierr.CodeInvalidInput, "参数错误：无法从目录名推导模型名称")
+			}
+
+			ctx, err := app.FromContext(cmd.Context())
+			if err != nil {
+				return err
+			}
+			sess, err := ctx.SessionStore.Load()
+			if err != nil {
+				return clierr.New(clierr.CodeRuntime, "读取本地登录态失败："+err.Error())
+			}
+			gitlabToken := strings.TrimSpace(sess.GitlabToken)
+			if gitlabToken == "" {
+				return clierr.New(clierr.CodeRuntime, "当前登录态缺少 GitLab 认证信息，请先重新执行 gomall-cli auth login")
+			}
+
+			svc := model.NewService(ctx.APIClient)
+			target, err := resolveUploadTarget(cmd.Context(), svc, uploadTargetOptions{
+				ModelRef:        strings.TrimSpace(modelRef),
+				Name:            name,
+				CNName:          cnName,
+				License:         license,
+				Description:     description,
+				Visibility:      visibility,
+				TaskIDs:         taskIDs,
+				ReplaceIfExists: replaceIfExists,
+				UseIfExists:     useIfExists,
+				Debug:           debug,
+				Out:             cmd.OutOrStdout(),
+			})
+			if err != nil {
+				ctx.Logger.Error("model upload target resolve failed", "error", err, "name", name, "model_ref", modelRef)
+				return clierr.New(clierr.CodeRuntime, "准备上传模型失败："+err.Error())
+			}
+			if strings.TrimSpace(target.LabAddress) == "" {
+				return clierr.New(clierr.CodeRuntime, "模型仓库地址为空，无法上传")
+			}
+			if debug {
+				fmt.Fprintf(cmd.OutOrStdout(), "[DEBUG] upload target: id=%d name=%s repo=%s model_ref=%s\n", target.ID, target.Name, target.LabAddress, strings.TrimSpace(modelRef))
+			}
+
+			fmt.Printf("开始上传目录: %s\n", absFolder)
+			result, err := modelupload.Upload(cmd.Context(), modelupload.Options{
+				Dir:                  absFolder,
+				RepoURL:              target.LabAddress,
+				Token:                gitlabToken,
+				UserAgent:            ctx.Config.API.UserAgent,
+				Insecure:             ctx.Config.API.Insecure,
+				Timeout:              ctx.Config.API.LFSTimeout,
+				LargeFileThresholdMB: thresholdMB,
+				Branch:               strings.TrimSpace(branch),
+				Username:             sess.Username,
+				TransferURLOverride:  ctx.Config.API.LFSUploadURLOverride,
+				MergeRemote:          true,
+				Debug:                debug,
+				DebugOut:             cmd.OutOrStdout(),
+				ProgressOut:          cmd.OutOrStdout(),
+			})
+			if err != nil {
+				ctx.Logger.Error("model upload failed", "error", err, "name", target.Name, "repo_url", target.LabAddress)
+				return clierr.New(clierr.CodeRuntime, "上传模型失败："+err.Error())
+			}
+
+			fmt.Println("上传成功")
+			fmt.Printf("ID: %d\n", target.ID)
+			fmt.Printf("名称: %s\n", target.Name)
+			fmt.Printf("仓库地址: %s\n", target.LabAddress)
+			fmt.Printf("分支: %s\n", result.Branch)
+			fmt.Printf("Commit: %s\n", result.Commit)
+			fmt.Printf("文件数: %d\n", result.Files)
+			fmt.Printf("LFS文件数: %d\n", result.LFSFiles)
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&cnName, "cn-name", "", "model chinese name (default to folder name)")
+	cmd.Flags().StringVar(&license, "license", "MIT", "model license")
+	cmd.Flags().StringVar(&description, "description", "", "model description")
+	cmd.Flags().IntVar(&visibility, "visibility", 1, "1=private, 5=public")
+	cmd.Flags().StringVar(&taskIDs, "task-ids", "", "optional task ids, comma separated")
+	cmd.Flags().IntVar(&thresholdMB, "large-file-threshold-mb", 10, "files greater than or equal to this size use Git LFS")
+	cmd.Flags().StringVar(&branch, "branch", "master", "git branch to push")
+	cmd.Flags().StringVar(&modelRef, "model", "", "existing model reference, supports ID or 作者/名称; empty means create a new model from folder name")
+	cmd.Flags().BoolVar(&debug, "debug", false, "print model upload debug flow, LFS batch payloads and HTTP responses")
+	cmd.Flags().BoolVar(&replaceIfExists, "replace-if-exists", false, "delete and recreate the current user's same-name model when creating a new upload target")
+	cmd.Flags().BoolVar(&useIfExists, "use-if-exists", false, "reuse the current user's same-name model repository when creating a new upload target")
+	return cmd
+}
+
+type uploadTarget struct {
+	ID         int64
+	Name       string
+	LabAddress string
+}
+
+type uploadTargetOptions struct {
+	ModelRef        string
+	Name            string
+	CNName          string
+	License         string
+	Description     string
+	Visibility      int
+	TaskIDs         string
+	ReplaceIfExists bool
+	UseIfExists     bool
+	Debug           bool
+	Out             io.Writer
+}
+
+func resolveUploadTarget(ctx context.Context, svc *model.Service, opts uploadTargetOptions) (uploadTarget, error) {
+	modelRef := strings.TrimSpace(opts.ModelRef)
+	if modelRef == "" {
+		created, err := createUploadTarget(ctx, svc, opts)
+		if err != nil {
+			if opts.ReplaceIfExists && isModelAlreadyExistsError(err) {
+				return replaceExistingUploadTarget(ctx, svc, opts)
+			}
+			if opts.UseIfExists && isModelAlreadyExistsError(err) {
+				return useExistingUploadTarget(ctx, svc, opts)
+			}
+			return uploadTarget{}, fmt.Errorf("创建模型失败：%w", err)
+		}
+		return uploadTarget{ID: created.ID, Name: created.Name, LabAddress: created.LabAddress}, nil
+	}
+
+	fmt.Printf("查询已有模型: %s\n", modelRef)
+	var detail model.ModelDetail
+	var err error
+	if id, ok := tryParsePositiveInt64(modelRef); ok {
+		detail, err = svc.DetailByID(ctx, id)
+	} else {
+		author, modelName, parseErr := splitModelRef(modelRef)
+		if parseErr != nil {
+			return uploadTarget{}, fmt.Errorf("参数错误：--model 必须是 ID 或 作者/名称")
+		}
+		detail, err = svc.Detail(ctx, author, modelName)
+	}
+	if err != nil {
+		return uploadTarget{}, fmt.Errorf("查询已有模型失败：%w", err)
+	}
+	return uploadTarget{ID: detail.ID, Name: detail.Name, LabAddress: detail.LabAddress}, nil
+}
+
+func createUploadTarget(ctx context.Context, svc *model.Service, opts uploadTargetOptions) (model.CreatedModel, error) {
+	createCtx, cancelCreate := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancelCreate()
+
+	fmt.Printf("开始创建模型: %s\n", strings.TrimSpace(opts.Name))
+	return svc.Create(createCtx, model.CreateOptions{
+		Name:        strings.TrimSpace(opts.Name),
+		CNName:      strings.TrimSpace(opts.CNName),
+		License:     strings.TrimSpace(opts.License),
+		Description: strings.TrimSpace(opts.Description),
+		Visibility:  opts.Visibility,
+		TaskIDs:     strings.TrimSpace(opts.TaskIDs),
+	})
+}
+
+func replaceExistingUploadTarget(ctx context.Context, svc *model.Service, opts uploadTargetOptions) (uploadTarget, error) {
+	name := strings.TrimSpace(opts.Name)
+	fmt.Printf("模型已存在，开始删除并重新创建: %s\n", name)
+	existing, err := findCreatedModelByExactName(ctx, svc, name)
+	if err != nil {
+		return uploadTarget{}, fmt.Errorf("查找已存在模型失败：%w", err)
+	}
+	if existing.ID <= 0 {
+		return uploadTarget{}, fmt.Errorf("模型已存在，但没有在当前用户创建的模型列表中找到同名模型：%s", name)
+	}
+	if opts.Debug {
+		fmt.Fprintf(opts.Out, "[DEBUG] replace existing model: id=%d name=%s repo=%s\n", existing.ID, existing.Name, existing.LabAddress)
+	}
+
+	deleteCtx, cancelDelete := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancelDelete()
+	if err := svc.DeleteByID(deleteCtx, existing.ID); err != nil {
+		return uploadTarget{}, fmt.Errorf("删除已存在模型失败：%w", err)
+	}
+	fmt.Printf("已删除旧模型: ID=%d\n", existing.ID)
+
+	created, err := createUploadTarget(ctx, svc, opts)
+	if err != nil {
+		return uploadTarget{}, fmt.Errorf("重新创建模型失败：%w", err)
+	}
+	return uploadTarget{ID: created.ID, Name: created.Name, LabAddress: created.LabAddress}, nil
+}
+
+func useExistingUploadTarget(ctx context.Context, svc *model.Service, opts uploadTargetOptions) (uploadTarget, error) {
+	name := strings.TrimSpace(opts.Name)
+	fmt.Printf("模型已存在，使用已有模型仓库继续上传: %s\n", name)
+	existing, err := findCreatedModelByExactName(ctx, svc, name)
+	if err != nil {
+		return uploadTarget{}, fmt.Errorf("查找已存在模型失败：%w", err)
+	}
+	if existing.ID <= 0 {
+		return uploadTarget{}, fmt.Errorf("模型已存在，但没有在当前用户创建的模型列表中找到同名模型：%s", name)
+	}
+	if strings.TrimSpace(existing.LabAddress) == "" {
+		return uploadTarget{}, fmt.Errorf("已存在模型仓库地址为空：%s", name)
+	}
+	if opts.Debug {
+		fmt.Fprintf(opts.Out, "[DEBUG] use existing model: id=%d name=%s repo=%s\n", existing.ID, existing.Name, existing.LabAddress)
+	}
+	return uploadTarget{ID: existing.ID, Name: existing.Name, LabAddress: existing.LabAddress}, nil
+}
+
+func findCreatedModelByExactName(ctx context.Context, svc *model.Service, name string) (model.ModelItem, error) {
+	result, err := svc.Created(ctx, model.CreatedOptions{Name: name, Page: 1, Size: 100})
+	if err != nil {
+		return model.ModelItem{}, err
+	}
+	for _, item := range result.Items {
+		if item.Name == name {
+			return item, nil
+		}
+	}
+	return model.ModelItem{}, nil
+}
+
+func isModelAlreadyExistsError(err error) bool {
+	var apiErr *model.APIError
+	if errors.As(err, &apiErr) && apiErr.Code == 10145 {
+		return true
+	}
+	return strings.Contains(err.Error(), "code=10145") || strings.Contains(err.Error(), "模型已经存在")
 }
 
 func confirmDelete(cmd *cobra.Command, id int64) (bool, error) {

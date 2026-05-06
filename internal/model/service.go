@@ -21,6 +21,20 @@ type Service struct {
 	client *gomallapi.Client
 }
 
+type APIError struct {
+	Operation string
+	Code      int
+	Message   string
+	RequestID string
+}
+
+func (e *APIError) Error() string {
+	if strings.TrimSpace(e.RequestID) != "" {
+		return fmt.Sprintf("%s failed: code=%d message=%s request_id=%s", e.Operation, e.Code, e.Message, e.RequestID)
+	}
+	return fmt.Sprintf("%s failed: code=%d message=%s", e.Operation, e.Code, e.Message)
+}
+
 func NewService(client *gomallapi.Client) *Service {
 	return &Service{client: client}
 }
@@ -132,7 +146,7 @@ func (s *Service) Detail(ctx context.Context, author, name string) (ModelDetail,
 		return ModelDetail{}, err
 	}
 	if env.Code != 200 {
-		return ModelDetail{}, fmt.Errorf("model detail failed: code=%d message=%s", env.Code, env.Message)
+		return ModelDetail{}, apiError("model detail", env)
 	}
 
 	var detail ModelDetail
@@ -153,7 +167,7 @@ func (s *Service) DetailByID(ctx context.Context, id int64) (ModelDetail, error)
 		return ModelDetail{}, err
 	}
 	if env.Code != 200 {
-		return ModelDetail{}, fmt.Errorf("model detail failed: code=%d message=%s", env.Code, env.Message)
+		return ModelDetail{}, apiError("model detail", env)
 	}
 
 	var detail ModelDetail
@@ -201,7 +215,7 @@ func (s *Service) Create(ctx context.Context, opts CreateOptions) (CreatedModel,
 		return CreatedModel{}, err
 	}
 	if env.Code != 200 {
-		return CreatedModel{}, fmt.Errorf("model create failed: code=%d message=%s", env.Code, env.Message)
+		return CreatedModel{}, apiError("model create", env)
 	}
 
 	var created CreatedModel
@@ -221,7 +235,7 @@ func (s *Service) DeleteByID(ctx context.Context, id int64) error {
 		return err
 	}
 	if env.Code != 200 {
-		return fmt.Errorf("model delete failed: code=%d message=%s", env.Code, env.Message)
+		return apiError("model delete", env)
 	}
 	return nil
 }
@@ -264,13 +278,22 @@ func buildDeleteByIDPath(id int64) string {
 
 func decodeSearchResult(env gomallapi.Envelope) (SearchResult, error) {
 	if env.Code != 200 {
-		return SearchResult{}, fmt.Errorf("model search failed: code=%d message=%s", env.Code, env.Message)
+		return SearchResult{}, apiError("model search", env)
 	}
 	var result SearchResult
 	if err := env.DecodeData(&result); err != nil {
 		return SearchResult{}, err
 	}
 	return result, nil
+}
+
+func apiError(operation string, env gomallapi.Envelope) error {
+	return &APIError{
+		Operation: operation,
+		Code:      env.Code,
+		Message:   env.Message,
+		RequestID: env.RequestID,
+	}
 }
 
 func normalizePage(page int) int {
