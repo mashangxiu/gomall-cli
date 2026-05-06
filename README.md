@@ -21,6 +21,17 @@ go run . version
 go run . hello sun
 ```
 
+## Release
+
+Push a version tag to trigger GitHub Actions packaging and publish the generated archives to GitHub Releases:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The release workflow builds Linux, macOS, and Windows packages for amd64 and arm64, then uploads them with a `checksums.txt` file.
+
 ## Login And Session
 
 ```bash

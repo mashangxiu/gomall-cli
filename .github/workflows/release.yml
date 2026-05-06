@@ -1,0 +1,87 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.0"
+          cache: true
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build packages
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          commit="${GITHUB_SHA}"
+          date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          ldflags="-s -w -X gomall-cli/cmd.version=${version} -X gomall-cli/cmd.commit=${commit} -X gomall-cli/cmd.date=${date}"
+
+          mkdir -p dist
+
+          platforms=(
+            "linux amd64"
+            "linux arm64"
+            "darwin amd64"
+            "darwin arm64"
+            "windows amd64"
+            "windows arm64"
+          )
+
+          for platform in "${platforms[@]}"; do
+            read -r goos goarch <<< "${platform}"
+            binary="gomall-cli"
+            if [[ "${goos}" == "windows" ]]; then
+              binary="gomall-cli.exe"
+            fi
+
+            package_dir="dist/gomall-cli_${version}_${goos}_${goarch}"
+            mkdir -p "${package_dir}"
+
+            CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" go build \
+              -trimpath \
+              -ldflags "${ldflags}" \
+              -o "${package_dir}/${binary}" \
+              .
+
+            cp README.md "${package_dir}/"
+            cp configs/gomall-cli.yaml.example "${package_dir}/"
+
+            if [[ "${goos}" == "windows" ]]; then
+              (cd dist && zip -qr "gomall-cli_${version}_${goos}_${goarch}.zip" "$(basename "${package_dir}")")
+            else
+              tar -C dist -czf "dist/gomall-cli_${version}_${goos}_${goarch}.tar.gz" "$(basename "${package_dir}")"
+            fi
+          done
+
+          (cd dist && shasum -a 256 gomall-cli_${version}_* > checksums.txt)
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            dist/gomall-cli_* \
+            dist/checksums.txt \
+            --title "${GITHUB_REF_NAME}" \
+            --notes "Automated release for ${GITHUB_REF_NAME}."
