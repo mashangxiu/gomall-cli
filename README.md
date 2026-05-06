@@ -38,6 +38,13 @@ go run . model search --name qwen
 go run . model created
 go run . model created --name qwen
 
+# create model (requires login first)
+go run . model create --name demomodel
+go run . model create --name demomodel --visibility 5
+
+# delete model by id (requires login first)
+go run . model delete 2546
+
 # model detail by author/name (requires login first)
 go run . model detail gomall/test1
 go run . model detail gomall/test1 --show-readme

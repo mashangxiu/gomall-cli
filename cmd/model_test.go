@@ -80,11 +80,54 @@ func TestTryParsePositiveInt64Invalid(t *testing.T) {
 	}
 }
 
+func TestDeleteAcceptsIDInput(t *testing.T) {
+	t.Parallel()
+
+	id, ok := tryParsePositiveInt64("2546")
+	if !ok || id != 2546 {
+		t.Fatalf("delete input id parse failed: (%d, %t)", id, ok)
+	}
+}
+
+func TestIsYesInput(t *testing.T) {
+	t.Parallel()
+
+	if !isYesInput("y") {
+		t.Fatalf("isYesInput(y) should be true")
+	}
+	if !isYesInput("yes") {
+		t.Fatalf("isYesInput(yes) should be true")
+	}
+	if !isYesInput(" YES \n") {
+		t.Fatalf("isYesInput(YES) should be true")
+	}
+	if isYesInput("n") {
+		t.Fatalf("isYesInput(n) should be false")
+	}
+	if isYesInput("") {
+		t.Fatalf("isYesInput(empty) should be false")
+	}
+}
+
 func TestCloneAcceptsIDInput(t *testing.T) {
 	t.Parallel()
 
 	if id, ok := tryParsePositiveInt64("1700"); !ok || id != 1700 {
 		t.Fatalf("clone input id parse failed: (%d, %t)", id, ok)
+	}
+}
+
+func TestVisibilityText(t *testing.T) {
+	t.Parallel()
+
+	if got := visibilityText(1); got != "私有(1)" {
+		t.Fatalf("visibilityText(1) = %q", got)
+	}
+	if got := visibilityText(5); got != "公开(5)" {
+		t.Fatalf("visibilityText(5) = %q", got)
+	}
+	if got := visibilityText(9); got != "9" {
+		t.Fatalf("visibilityText(9) = %q", got)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"strings"
@@ -72,23 +73,78 @@ func (c *Client) DoWithToken(ctx context.Context, method, apiPath string, reqBod
 	return c.do(ctx, method, apiPath, reqBody, token)
 }
 
+// DoMultipartForm sends multipart/form-data request with key-value form fields.
+func (c *Client) DoMultipartForm(
+	ctx context.Context,
+	method, apiPath string,
+	fields map[string]string,
+	requireAuth bool,
+) (Envelope, error) {
+	var token string
+	if requireAuth {
+		if c.tokenProvider == nil {
+			return Envelope{}, fmt.Errorf("token provider not configured")
+		}
+		t, err := c.tokenProvider(ctx)
+		if err != nil {
+			return Envelope{}, fmt.Errorf("load token: %w", err)
+		}
+		token = t
+	}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	for k, v := range fields {
+		if err := writer.WriteField(k, v); err != nil {
+			return Envelope{}, fmt.Errorf("write multipart field %q: %w", k, err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		return Envelope{}, fmt.Errorf("finalize multipart body: %w", err)
+	}
+
+	return c.doWithReader(
+		ctx,
+		method,
+		apiPath,
+		&body,
+		writer.FormDataContentType(),
+		token,
+	)
+}
+
 func (c *Client) do(ctx context.Context, method, apiPath string, reqBody any, token string) (Envelope, error) {
+	var bodyReader io.Reader
+	var contentType string
 	if strings.TrimSpace(apiPath) == "" {
 		return Envelope{}, fmt.Errorf("api path cannot be empty")
 	}
 
-	u, err := c.resolveURL(apiPath)
-	if err != nil {
-		return Envelope{}, err
-	}
-
-	var bodyReader io.Reader
 	if reqBody != nil {
 		b, err := json.Marshal(reqBody)
 		if err != nil {
 			return Envelope{}, fmt.Errorf("marshal request body: %w", err)
 		}
 		bodyReader = bytes.NewReader(b)
+		contentType = "application/json"
+	}
+
+	return c.doWithReader(ctx, method, apiPath, bodyReader, contentType, token)
+}
+
+func (c *Client) doWithReader(
+	ctx context.Context,
+	method, apiPath string,
+	bodyReader io.Reader,
+	contentType string,
+	token string,
+) (Envelope, error) {
+	if strings.TrimSpace(apiPath) == "" {
+		return Envelope{}, fmt.Errorf("api path cannot be empty")
+	}
+	u, err := c.resolveURL(apiPath)
+	if err != nil {
+		return Envelope{}, err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, u, bodyReader)
@@ -98,8 +154,8 @@ func (c *Client) do(ctx context.Context, method, apiPath string, reqBody any, to
 
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("User-Agent", c.userAgent)
-	if reqBody != nil {
-		req.Header.Set("Content-Type", "application/json")
+	if strings.TrimSpace(contentType) != "" {
+		req.Header.Set("Content-Type", contentType)
 	}
 
 	if token != "" {

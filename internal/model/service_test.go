@@ -68,3 +68,21 @@ func TestBuildDetailByIDPath(t *testing.T) {
 		t.Fatalf("buildDetailByIDPath() = %q, want %q", got, want)
 	}
 }
+
+func TestCreatePathConstant(t *testing.T) {
+	t.Parallel()
+
+	if createPath != "/goMallApi/api/v2/models/create" {
+		t.Fatalf("createPath = %q", createPath)
+	}
+}
+
+func TestBuildDeleteByIDPath(t *testing.T) {
+	t.Parallel()
+
+	got := buildDeleteByIDPath(2546)
+	want := "/goMallApi/api/v2/models/2546"
+	if got != want {
+		t.Fatalf("buildDeleteByIDPath() = %q, want %q", got, want)
+	}
+}

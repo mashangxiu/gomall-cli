@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -34,6 +35,8 @@ func newModelCmd() *cobra.Command {
 
 	modelCmd.AddCommand(newModelSearchCmd())
 	modelCmd.AddCommand(newModelCreatedCmd())
+	modelCmd.AddCommand(newModelCreateCmd())
+	modelCmd.AddCommand(newModelDeleteCmd())
 	modelCmd.AddCommand(newModelCloneCmd())
 	modelCmd.AddCommand(newModelDetailCmd())
 	return modelCmd
@@ -147,6 +150,140 @@ func newModelCreatedCmd() *cobra.Command {
 	cmd.Flags().IntVar(&page, "page", 1, "page number")
 	cmd.Flags().IntVar(&size, "size", 16, "page size")
 	return cmd
+}
+
+func newModelCreateCmd() *cobra.Command {
+	var name string
+	var cnName string
+	var license string
+	var description string
+	var visibility int
+	var taskIDs string
+
+	cmd := &cobra.Command{
+		Use:   "create",
+		Short: "Create a model",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name = strings.TrimSpace(name)
+			if name == "" {
+				return clierr.New(clierr.CodeInvalidInput, "参数错误：--name 不能为空")
+			}
+			if visibility != 1 && visibility != 5 {
+				return clierr.New(clierr.CodeInvalidInput, "参数错误：--visibility 仅支持 1(私有) 或 5(公开)")
+			}
+
+			ctx, err := app.FromContext(cmd.Context())
+			if err != nil {
+				return err
+			}
+
+			svc := model.NewService(ctx.APIClient)
+			createCtx, cancel := context.WithTimeout(cmd.Context(), 3*time.Minute)
+			defer cancel()
+
+			created, err := svc.Create(createCtx, model.CreateOptions{
+				Name:        name,
+				CNName:      strings.TrimSpace(cnName),
+				License:     strings.TrimSpace(license),
+				Description: strings.TrimSpace(description),
+				Visibility:  visibility,
+				TaskIDs:     strings.TrimSpace(taskIDs),
+			})
+			if err != nil {
+				ctx.Logger.Error("model create failed", "error", err, "name", name, "visibility", visibility)
+				return clierr.New(clierr.CodeRuntime, "创建模型失败："+err.Error())
+			}
+
+			fmt.Println("创建成功")
+			fmt.Printf("ID: %d\n", created.ID)
+			fmt.Printf("作者: %s\n", created.Username)
+			fmt.Printf("名称: %s\n", created.Name)
+			if strings.TrimSpace(created.CNName) != "" {
+				fmt.Printf("中文名: %s\n", created.CNName)
+			}
+			fmt.Printf("可见性: %s\n", visibilityText(created.VisibilityStatus))
+			if strings.TrimSpace(created.License) != "" {
+				fmt.Printf("许可证: %s\n", created.License)
+			}
+			fmt.Printf("创建时间: %s\n", formatShanghaiTime(created.CreatedAt))
+			if strings.TrimSpace(created.LabAddress) != "" {
+				fmt.Printf("仓库地址: %s\n", created.LabAddress)
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&name, "name", "", "model name (required)")
+	cmd.Flags().StringVar(&cnName, "cn-name", "", "model chinese name (default to --name)")
+	cmd.Flags().StringVar(&license, "license", "MIT", "model license")
+	cmd.Flags().StringVar(&description, "description", "", "model description")
+	cmd.Flags().IntVar(&visibility, "visibility", 1, "1=private, 5=public")
+	cmd.Flags().StringVar(&taskIDs, "task-ids", "", "optional task ids, comma separated")
+	_ = cmd.MarkFlagRequired("name")
+	return cmd
+}
+
+func newModelDeleteCmd() *cobra.Command {
+	var yes bool
+
+	cmd := &cobra.Command{
+		Use:   "delete ID",
+		Short: "Delete a model by numeric ID",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			id, ok := tryParsePositiveInt64(strings.TrimSpace(args[0]))
+			if !ok {
+				return clierr.New(clierr.CodeInvalidInput, "参数错误：ID 必须是大于 0 的整数")
+			}
+
+			ctx, err := app.FromContext(cmd.Context())
+			if err != nil {
+				return err
+			}
+
+			if !yes {
+				confirmed, confirmErr := confirmDelete(cmd, id)
+				if confirmErr != nil {
+					return clierr.New(clierr.CodeRuntime, "读取确认输入失败："+confirmErr.Error())
+				}
+				if !confirmed {
+					fmt.Println("已取消删除")
+					return nil
+				}
+			}
+
+			svc := model.NewService(ctx.APIClient)
+			deleteCtx, cancel := context.WithTimeout(cmd.Context(), 3*time.Minute)
+			defer cancel()
+
+			if err := svc.DeleteByID(deleteCtx, id); err != nil {
+				ctx.Logger.Error("model delete failed", "error", err, "id", id)
+				return clierr.New(clierr.CodeRuntime, "删除模型失败："+err.Error())
+			}
+
+			fmt.Println("删除成功")
+			fmt.Printf("ID: %d\n", id)
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVar(&yes, "yes", false, "skip interactive confirmation")
+	return cmd
+}
+
+func confirmDelete(cmd *cobra.Command, id int64) (bool, error) {
+	fmt.Fprintf(cmd.OutOrStdout(), "确认删除模型 ID=%d ? [y/N]: ", id)
+	reader := bufio.NewReader(cmd.InOrStdin())
+	line, err := reader.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return false, err
+	}
+	return isYesInput(line), nil
+}
+
+func isYesInput(input string) bool {
+	v := strings.ToLower(strings.TrimSpace(input))
+	return v == "y" || v == "yes"
 }
 
 func newModelCloneCmd() *cobra.Command {
@@ -353,6 +490,17 @@ func formatShanghaiTime(unixSec int64) string {
 	}
 	cst := time.FixedZone("CST", 8*3600)
 	return time.Unix(unixSec, 0).In(cst).Format("2006-01-02 15:04:05")
+}
+
+func visibilityText(v int) string {
+	switch v {
+	case 1:
+		return "私有(1)"
+	case 5:
+		return "公开(5)"
+	default:
+		return strconv.Itoa(v)
+	}
 }
 
 func splitModelRef(ref string) (string, string, error) {

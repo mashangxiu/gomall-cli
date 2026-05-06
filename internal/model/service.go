@@ -13,6 +13,8 @@ import (
 
 const searchPath = "/goMallApi/api/v2/models"
 const detailPathPrefix = "/goMallApi/api/v2/models/detail"
+const createPath = "/goMallApi/api/v2/models/create"
+const deletePathPrefix = "/goMallApi/api/v2/models"
 
 // Service handles model-related API operations.
 type Service struct {
@@ -42,6 +44,15 @@ type SearchResult struct {
 	TotalPages int         `json:"total_pages"`
 }
 
+type CreateOptions struct {
+	Name        string
+	CNName      string
+	License     string
+	Description string
+	Visibility  int
+	TaskIDs     string
+}
+
 type ModelItem struct {
 	ID          int64  `json:"id"`
 	CreatedAt   int64  `json:"created_at"`
@@ -69,6 +80,21 @@ type ModelDetail struct {
 	License     string `json:"license"`
 	LabAddress  string `json:"lab_address"`
 	Readme      string `json:"readme_content"`
+}
+
+type CreatedModel struct {
+	ID               int64  `json:"id"`
+	CreatedAt        int64  `json:"created_at"`
+	UpdatedAt        int64  `json:"updated_at"`
+	Name             string `json:"name"`
+	CNName           string `json:"cn_name"`
+	Description      string `json:"description"`
+	Username         string `json:"username"`
+	License          string `json:"license"`
+	LabAddress       string `json:"lab_address"`
+	VisibilityStatus int    `json:"visibility_status"`
+	GitlabID         int64  `json:"gitlab_id"`
+	Source           string `json:"source"`
 }
 
 func (s *Service) Search(ctx context.Context, opts SearchOptions) (SearchResult, error) {
@@ -137,6 +163,69 @@ func (s *Service) DetailByID(ctx context.Context, id int64) (ModelDetail, error)
 	return detail, nil
 }
 
+func (s *Service) Create(ctx context.Context, opts CreateOptions) (CreatedModel, error) {
+	name := strings.TrimSpace(opts.Name)
+	if name == "" {
+		return CreatedModel{}, fmt.Errorf("name cannot be empty")
+	}
+
+	visibility := opts.Visibility
+	if visibility == 0 {
+		visibility = 1
+	}
+	if visibility != 1 && visibility != 5 {
+		return CreatedModel{}, fmt.Errorf("visibility must be 1(private) or 5(public)")
+	}
+
+	license := strings.TrimSpace(opts.License)
+	if license == "" {
+		license = "MIT"
+	}
+
+	cnName := strings.TrimSpace(opts.CNName)
+	if cnName == "" {
+		cnName = name
+	}
+
+	fields := map[string]string{
+		"name":        name,
+		"cn_name":     cnName,
+		"license":     license,
+		"description": strings.TrimSpace(opts.Description),
+		"visibility":  strconv.Itoa(visibility),
+		"task_ids":    strings.TrimSpace(opts.TaskIDs),
+	}
+
+	env, err := s.client.DoMultipartForm(ctx, http.MethodPost, createPath, fields, true)
+	if err != nil {
+		return CreatedModel{}, err
+	}
+	if env.Code != 200 {
+		return CreatedModel{}, fmt.Errorf("model create failed: code=%d message=%s", env.Code, env.Message)
+	}
+
+	var created CreatedModel
+	if err := env.DecodeData(&created); err != nil {
+		return CreatedModel{}, err
+	}
+	return created, nil
+}
+
+func (s *Service) DeleteByID(ctx context.Context, id int64) error {
+	if id <= 0 {
+		return fmt.Errorf("id must be greater than 0")
+	}
+	path := buildDeleteByIDPath(id)
+	env, err := s.client.Do(ctx, http.MethodDelete, path, nil, true)
+	if err != nil {
+		return err
+	}
+	if env.Code != 200 {
+		return fmt.Errorf("model delete failed: code=%d message=%s", env.Code, env.Message)
+	}
+	return nil
+}
+
 func buildSearchPath(name string, page, size int) string {
 	q := url.Values{}
 	q.Set("size", strconv.Itoa(size))
@@ -167,6 +256,10 @@ func buildDetailPath(author, name string) string {
 
 func buildDetailByIDPath(id int64) string {
 	return detailPathPrefix + "/" + strconv.FormatInt(id, 10)
+}
+
+func buildDeleteByIDPath(id int64) string {
+	return deletePathPrefix + "/" + strconv.FormatInt(id, 10)
 }
 
 func decodeSearchResult(env gomallapi.Envelope) (SearchResult, error) {
