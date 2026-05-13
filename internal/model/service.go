@@ -134,6 +134,14 @@ func (s *Service) Created(ctx context.Context, opts CreatedOptions) (SearchResul
 }
 
 func (s *Service) Detail(ctx context.Context, author, name string) (ModelDetail, error) {
+	return s.detail(ctx, author, name, "")
+}
+
+func (s *Service) DetailWithToken(ctx context.Context, author, name, token string) (ModelDetail, error) {
+	return s.detail(ctx, author, name, token)
+}
+
+func (s *Service) detail(ctx context.Context, author, name, token string) (ModelDetail, error) {
 	author = strings.TrimSpace(author)
 	name = strings.TrimSpace(name)
 	if author == "" || name == "" {
@@ -141,7 +149,7 @@ func (s *Service) Detail(ctx context.Context, author, name string) (ModelDetail,
 	}
 
 	path := buildDetailPath(author, name)
-	env, err := s.client.Do(ctx, http.MethodGet, path, nil, true)
+	env, err := s.doAuth(ctx, http.MethodGet, path, nil, token)
 	if err != nil {
 		return ModelDetail{}, err
 	}
@@ -157,12 +165,20 @@ func (s *Service) Detail(ctx context.Context, author, name string) (ModelDetail,
 }
 
 func (s *Service) DetailByID(ctx context.Context, id int64) (ModelDetail, error) {
+	return s.detailByID(ctx, id, "")
+}
+
+func (s *Service) DetailByIDWithToken(ctx context.Context, id int64, token string) (ModelDetail, error) {
+	return s.detailByID(ctx, id, token)
+}
+
+func (s *Service) detailByID(ctx context.Context, id int64, token string) (ModelDetail, error) {
 	if id <= 0 {
 		return ModelDetail{}, fmt.Errorf("id must be greater than 0")
 	}
 
 	path := buildDetailByIDPath(id)
-	env, err := s.client.Do(ctx, http.MethodGet, path, nil, true)
+	env, err := s.doAuth(ctx, http.MethodGet, path, nil, token)
 	if err != nil {
 		return ModelDetail{}, err
 	}
@@ -175,6 +191,14 @@ func (s *Service) DetailByID(ctx context.Context, id int64) (ModelDetail, error)
 		return ModelDetail{}, err
 	}
 	return detail, nil
+}
+
+func (s *Service) doAuth(ctx context.Context, method, path string, body any, token string) (gomallapi.Envelope, error) {
+	token = strings.TrimSpace(token)
+	if token != "" {
+		return s.client.DoWithToken(ctx, method, path, body, token)
+	}
+	return s.client.Do(ctx, method, path, body, true)
 }
 
 func (s *Service) Create(ctx context.Context, opts CreateOptions) (CreatedModel, error) {

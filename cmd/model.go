@@ -554,6 +554,15 @@ func confirmDelete(cmd *cobra.Command, id int64) (bool, error) {
 	return isYesInput(line), nil
 }
 
+func readTokenFromStdin(cmd *cobra.Command) (string, error) {
+	reader := bufio.NewReader(cmd.InOrStdin())
+	line, err := reader.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", err
+	}
+	return strings.TrimSpace(line), nil
+}
+
 func isYesInput(input string) bool {
 	v := strings.ToLower(strings.TrimSpace(input))
 	return v == "y" || v == "yes"
@@ -562,10 +571,12 @@ func isYesInput(input string) bool {
 func newModelCloneCmd() *cobra.Command {
 	var into string
 	var dir string
+	var token string
+	var tokenStdin bool
 	var debugLFSBatch bool
 
 	cmd := &cobra.Command{
-		Use:   "clone 作者/名称|ID",
+		Use:   "clone 作者/名称|ID|仓库URL",
 		Short: "Clone model repository to local directory",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -574,32 +585,62 @@ func newModelCloneCmd() *cobra.Command {
 				return err
 			}
 
-			svc := model.NewService(ctx.APIClient)
-			input := strings.TrimSpace(args[0])
-			var detail model.ModelDetail
-			if id, ok := tryParsePositiveInt64(input); ok {
-				detail, err = svc.DetailByID(cmd.Context(), id)
-				if err != nil {
-					ctx.Logger.Error("model detail by id failed before clone", "error", err, "id", id)
-					return clierr.New(clierr.CodeRuntime, "获取模型详情失败："+err.Error())
+			explicitToken := strings.TrimSpace(token)
+			if tokenStdin {
+				if explicitToken != "" {
+					return clierr.New(clierr.CodeInvalidInput, "参数错误：--token 和 --token-stdin 不能同时使用")
 				}
-			} else {
-				author, name, parseErr := splitModelRef(input)
-				if parseErr != nil {
-					return clierr.New(clierr.CodeInvalidInput, "参数错误："+parseErr.Error())
-				}
-				detail, err = svc.Detail(cmd.Context(), author, name)
+				explicitToken, err = readTokenFromStdin(cmd)
 				if err != nil {
-					ctx.Logger.Error("model detail failed before clone", "error", err, "author", author, "name", name)
-					return clierr.New(clierr.CodeRuntime, "获取模型详情失败："+err.Error())
+					return clierr.New(clierr.CodeInvalidInput, "读取 token 失败："+err.Error())
+				}
+				if explicitToken == "" {
+					return clierr.New(clierr.CodeInvalidInput, "参数错误：stdin 中的 token 不能为空")
 				}
 			}
-			repoURL := strings.TrimSpace(detail.LabAddress)
+
+			input := strings.TrimSpace(args[0])
+			repoURL := ""
+			modelName := ""
+			if isCloneRepoURL(input) {
+				repoURL = input
+				modelName = deriveRepoDirName(repoURL, "")
+			} else {
+				svc := model.NewService(ctx.APIClient)
+				var detail model.ModelDetail
+				if id, ok := tryParsePositiveInt64(input); ok {
+					if explicitToken != "" {
+						detail, err = svc.DetailByIDWithToken(cmd.Context(), id, explicitToken)
+					} else {
+						detail, err = svc.DetailByID(cmd.Context(), id)
+					}
+					if err != nil {
+						ctx.Logger.Error("model detail by id failed before clone", "error", err, "id", id)
+						return clierr.New(clierr.CodeRuntime, "获取模型详情失败："+err.Error())
+					}
+				} else {
+					author, name, parseErr := splitModelRef(input)
+					if parseErr != nil {
+						return clierr.New(clierr.CodeInvalidInput, "参数错误："+parseErr.Error())
+					}
+					if explicitToken != "" {
+						detail, err = svc.DetailWithToken(cmd.Context(), author, name, explicitToken)
+					} else {
+						detail, err = svc.Detail(cmd.Context(), author, name)
+					}
+					if err != nil {
+						ctx.Logger.Error("model detail failed before clone", "error", err, "author", author, "name", name)
+						return clierr.New(clierr.CodeRuntime, "获取模型详情失败："+err.Error())
+					}
+				}
+				repoURL = strings.TrimSpace(detail.LabAddress)
+				modelName = detail.Name
+			}
 			if repoURL == "" {
 				return clierr.New(clierr.CodeRuntime, "模型仓库地址为空，无法克隆")
 			}
 
-			targetDir, err := resolveCloneTarget(repoURL, detail.Name, into, dir)
+			targetDir, err := resolveCloneTarget(repoURL, modelName, into, dir)
 			if err != nil {
 				return clierr.New(clierr.CodeInvalidInput, "参数错误："+err.Error())
 			}
@@ -621,11 +662,14 @@ func newModelCloneCmd() *cobra.Command {
 				}
 			}
 
-			sess, err := ctx.SessionStore.Load()
-			if err != nil {
-				return clierr.New(clierr.CodeRuntime, "读取本地登录态失败："+err.Error())
+			gitlabToken := explicitToken
+			if gitlabToken == "" {
+				sess, err := ctx.SessionStore.Load()
+				if err != nil {
+					return clierr.New(clierr.CodeRuntime, "读取本地登录态失败："+err.Error())
+				}
+				gitlabToken = strings.TrimSpace(sess.GitlabToken)
 			}
-			gitlabToken := strings.TrimSpace(sess.GitlabToken)
 			if gitlabToken == "" {
 				return clierr.New(
 					clierr.CodeRuntime,
@@ -689,6 +733,8 @@ func newModelCloneCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&into, "into", ".", "parent directory to place cloned repository")
 	cmd.Flags().StringVar(&dir, "dir", "", "explicit target directory, overrides --into")
+	cmd.Flags().StringVar(&token, "token", "", "explicit token for model detail, Git clone and LFS download; skips local login session lookup")
+	cmd.Flags().BoolVar(&tokenStdin, "token-stdin", false, "read explicit token from stdin instead of local login session")
 	cmd.Flags().BoolVar(&debugLFSBatch, "debug-lfs-batch", false, "print raw LFS Batch API response for debugging")
 	return cmd
 }
@@ -818,6 +864,14 @@ func deriveRepoDirName(repoURL, fallback string) string {
 	}
 	fallback = strings.TrimSpace(fallback)
 	return strings.TrimSuffix(fallback, ".git")
+}
+
+func isCloneRepoURL(input string) bool {
+	u, err := url.Parse(strings.TrimSpace(input))
+	if err != nil {
+		return false
+	}
+	return (u.Scheme == "http" || u.Scheme == "https") && strings.TrimSpace(u.Host) != ""
 }
 
 func ensureResumableRepo(targetDir, expectedRepoURL string) error {

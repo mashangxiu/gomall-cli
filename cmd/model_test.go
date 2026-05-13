@@ -3,6 +3,7 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	gogit "github.com/go-git/go-git/v5"
@@ -40,6 +41,17 @@ func TestDeriveRepoDirName(t *testing.T) {
 	got := deriveRepoDirName("http://10.208.61.121:8090/Qwen/Qwen2.5-3B-Instruct.git", "fallback")
 	if got != "Qwen2.5-3B-Instruct" {
 		t.Fatalf("deriveRepoDirName() = %q", got)
+	}
+}
+
+func TestIsCloneRepoURL(t *testing.T) {
+	t.Parallel()
+
+	if !isCloneRepoURL("https://example.com/group/model.git") {
+		t.Fatalf("https repo URL should be accepted")
+	}
+	if isCloneRepoURL("gomall/test1") {
+		t.Fatalf("model ref should not be treated as repo URL")
 	}
 }
 
@@ -114,6 +126,32 @@ func TestCloneAcceptsIDInput(t *testing.T) {
 
 	if id, ok := tryParsePositiveInt64("1700"); !ok || id != 1700 {
 		t.Fatalf("clone input id parse failed: (%d, %t)", id, ok)
+	}
+}
+
+func TestCloneTokenFlagsExist(t *testing.T) {
+	t.Parallel()
+
+	cmd := newModelCloneCmd()
+	if cmd.Flags().Lookup("token") == nil {
+		t.Fatalf("clone command should expose --token")
+	}
+	if cmd.Flags().Lookup("token-stdin") == nil {
+		t.Fatalf("clone command should expose --token-stdin")
+	}
+}
+
+func TestReadTokenFromStdin(t *testing.T) {
+	t.Parallel()
+
+	cmd := newModelCloneCmd()
+	cmd.SetIn(strings.NewReader("  test-token  \n"))
+	got, err := readTokenFromStdin(cmd)
+	if err != nil {
+		t.Fatalf("readTokenFromStdin() error = %v", err)
+	}
+	if got != "test-token" {
+		t.Fatalf("readTokenFromStdin() = %q, want %q", got, "test-token")
 	}
 }
 
