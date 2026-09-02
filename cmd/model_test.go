@@ -139,6 +139,9 @@ func TestCloneTokenFlagsExist(t *testing.T) {
 	if cmd.Flags().Lookup("token-stdin") == nil {
 		t.Fatalf("clone command should expose --token-stdin")
 	}
+	if cmd.Flags().Lookup("file") == nil {
+		t.Fatalf("clone command should expose --file")
+	}
 }
 
 func TestReadTokenFromStdin(t *testing.T) {
@@ -195,6 +198,34 @@ func TestSameRepoURL(t *testing.T) {
 	}
 	if sameRepoURL("http://a/b/c", "http://a/b/d") {
 		t.Fatalf("sameRepoURL() should detect mismatch")
+	}
+}
+
+func TestNormalizeCloneIncludePaths(t *testing.T) {
+	t.Parallel()
+
+	got := normalizeCloneIncludePaths([]string{
+		" ./model-00005-of-00015.safetensors ",
+		"model-00005-of-00015.safetensors",
+		"/tmp/model-00006-of-00015.safetensors",
+	})
+	want := []string{"model-00005-of-00015.safetensors", "model-00006-of-00015.safetensors"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("normalizeCloneIncludePaths() = %#v, want %#v", got, want)
+	}
+}
+
+func TestClonePathMatches(t *testing.T) {
+	t.Parallel()
+
+	if !clonePathMatches("weights/model-00005-of-00015.safetensors", []string{"model-00005-of-00015.safetensors"}) {
+		t.Fatalf("basename include should match nested file")
+	}
+	if !clonePathMatches("weights/model-00005-of-00015.safetensors", []string{"weights/model-00005-of-00015.safetensors"}) {
+		t.Fatalf("relative include should match exact path")
+	}
+	if clonePathMatches("weights/model-00006-of-00015.safetensors", []string{"weights/model-00005-of-00015.safetensors"}) {
+		t.Fatalf("different relative path should not match")
 	}
 }
 
@@ -278,7 +309,7 @@ func TestRestoreMissingTrackedFiles_DoesNotOverwriteExistingFiles(t *testing.T) 
 		t.Fatalf("Remove(README.md) error = %v", err)
 	}
 
-	restored, err := restoreMissingTrackedFiles(repoDir, tree)
+	restored, err := restoreMissingTrackedFiles(repoDir, tree, nil)
 	if err != nil {
 		t.Fatalf("restoreMissingTrackedFiles() error = %v", err)
 	}
@@ -300,5 +331,68 @@ func TestRestoreMissingTrackedFiles_DoesNotOverwriteExistingFiles(t *testing.T) 
 	}
 	if string(gotReadme) != "hello" {
 		t.Fatalf("README.md = %q, want %q", string(gotReadme), "hello")
+	}
+}
+
+func TestRestoreMissingTrackedFilesWithInclude(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	repo, err := gogit.PlainInit(repoDir, false)
+	if err != nil {
+		t.Fatalf("PlainInit() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "keep.bin"), []byte("keep"), 0o644); err != nil {
+		t.Fatalf("WriteFile(keep.bin) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "want.bin"), []byte("want"), 0o644); err != nil {
+		t.Fatalf("WriteFile(want.bin) error = %v", err)
+	}
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("Worktree() error = %v", err)
+	}
+	if _, err := wt.Add("keep.bin"); err != nil {
+		t.Fatalf("Add(keep.bin) error = %v", err)
+	}
+	if _, err := wt.Add("want.bin"); err != nil {
+		t.Fatalf("Add(want.bin) error = %v", err)
+	}
+	if _, err := wt.Commit("init", &gogit.CommitOptions{
+		Author: &object.Signature{Name: "test", Email: "test@example.com"},
+	}); err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+	head, err := repo.Head()
+	if err != nil {
+		t.Fatalf("Head() error = %v", err)
+	}
+	commit, err := repo.CommitObject(head.Hash())
+	if err != nil {
+		t.Fatalf("CommitObject() error = %v", err)
+	}
+	tree, err := commit.Tree()
+	if err != nil {
+		t.Fatalf("Tree() error = %v", err)
+	}
+	if err := os.Remove(filepath.Join(repoDir, "keep.bin")); err != nil {
+		t.Fatalf("Remove(keep.bin) error = %v", err)
+	}
+	if err := os.Remove(filepath.Join(repoDir, "want.bin")); err != nil {
+		t.Fatalf("Remove(want.bin) error = %v", err)
+	}
+
+	restored, err := restoreMissingTrackedFiles(repoDir, tree, []string{"want.bin"})
+	if err != nil {
+		t.Fatalf("restoreMissingTrackedFiles() error = %v", err)
+	}
+	if restored != 1 {
+		t.Fatalf("restored = %d, want 1", restored)
+	}
+	if _, err := os.Stat(filepath.Join(repoDir, "want.bin")); err != nil {
+		t.Fatalf("want.bin should be restored: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(repoDir, "keep.bin")); !os.IsNotExist(err) {
+		t.Fatalf("keep.bin should remain missing, err=%v", err)
 	}
 }

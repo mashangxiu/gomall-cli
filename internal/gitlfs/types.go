@@ -29,6 +29,7 @@ type HydrateOptions struct {
 	IdleTimeout         time.Duration
 	ChunkSize           int64
 	DownloadURLOverride string
+	IncludePaths        []string
 	ProgressOut         io.Writer
 	DebugBatch          bool
 	DebugOut            io.Writer

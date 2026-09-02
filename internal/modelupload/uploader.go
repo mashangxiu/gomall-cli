@@ -149,16 +149,9 @@ func Upload(ctx context.Context, opts Options) (Result, error) {
 		threshold = 10 * 1024 * 1024
 	}
 
-	root, err := filepath.Abs(opts.Dir)
+	root, err := resolveUploadRoot(opts.Dir)
 	if err != nil {
-		return Result{}, fmt.Errorf("resolve upload dir: %w", err)
-	}
-	stat, err := os.Stat(root)
-	if err != nil {
-		return Result{}, fmt.Errorf("stat upload dir: %w", err)
-	}
-	if !stat.IsDir() {
-		return Result{}, fmt.Errorf("upload path is not a directory: %s", root)
+		return Result{}, err
 	}
 
 	files, err := scanFiles(root)
@@ -275,6 +268,25 @@ func Upload(ctx context.Context, opts Options) (Result, error) {
 		TotalLFSBytes:  totalLFSBytes,
 		LargeThreshold: threshold,
 	}, nil
+}
+
+func resolveUploadRoot(dir string) (string, error) {
+	root, err := filepath.Abs(dir)
+	if err != nil {
+		return "", fmt.Errorf("resolve upload dir: %w", err)
+	}
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve upload dir symlinks: %w", err)
+	}
+	stat, err := os.Stat(root)
+	if err != nil {
+		return "", fmt.Errorf("stat upload dir: %w", err)
+	}
+	if !stat.IsDir() {
+		return "", fmt.Errorf("upload path is not a directory: %s", root)
+	}
+	return root, nil
 }
 
 func scanFiles(root string) ([]fileEntry, error) {

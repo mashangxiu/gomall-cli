@@ -1,6 +1,8 @@
 package modelupload
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -54,6 +56,47 @@ func TestShouldUseChunked(t *testing.T) {
 	}
 	if shouldUseChunked(map[string]string{"Transfer-Encoding": "gzip"}) {
 		t.Fatal("unexpected chunked detection")
+	}
+}
+
+func TestResolveUploadRootFollowsSymlinkDirectory(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	realRoot := filepath.Join(tmp, "real-model")
+	if err := os.Mkdir(realRoot, 0o755); err != nil {
+		t.Fatalf("Mkdir(realRoot) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(realRoot, "README.md"), []byte("hello"), 0o644); err != nil {
+		t.Fatalf("WriteFile(README.md) error = %v", err)
+	}
+	linkRoot := filepath.Join(tmp, "linked-model")
+	if err := os.Symlink(realRoot, linkRoot); err != nil {
+		t.Skipf("Symlink not supported: %v", err)
+	}
+
+	root, err := resolveUploadRoot(linkRoot)
+	if err != nil {
+		t.Fatalf("resolveUploadRoot() error = %v", err)
+	}
+	wantRoot, err := filepath.EvalSymlinks(realRoot)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(realRoot) error = %v", err)
+	}
+	if root != wantRoot {
+		t.Fatalf("resolveUploadRoot() = %q, want %q", root, wantRoot)
+	}
+	files, err := scanFiles(root)
+	if err != nil {
+		t.Fatalf("scanFiles() error = %v", err)
+	}
+	if len(files) != 1 || files[0].rel != "README.md" {
+		t.Fatalf("scanFiles() = %#v, want README.md only", files)
+	}
+	for _, f := range files {
+		if f.rel == "." {
+			t.Fatalf("scanFiles() included illegal dot path: %#v", files)
+		}
 	}
 }
 
