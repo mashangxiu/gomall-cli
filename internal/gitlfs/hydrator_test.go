@@ -3,6 +3,8 @@ package gitlfs
 import (
 	"bytes"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -37,6 +39,34 @@ func TestParsePointerInvalid(t *testing.T) {
 		if _, _, ok := parsePointer(c); ok {
 			t.Fatalf("parsePointer(%q) should fail", string(c))
 		}
+	}
+}
+
+func TestFilterPointersByIncludePath(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	weightsDir := filepath.Join(root, "weights")
+	if err := os.Mkdir(weightsDir, 0o755); err != nil {
+		t.Fatalf("Mkdir(weightsDir) error = %v", err)
+	}
+	first := pointerFile{Path: filepath.Join(weightsDir, "model-00001.safetensors"), OID: strings.Repeat("1", 64), Size: 1}
+	second := pointerFile{Path: filepath.Join(weightsDir, "model-00002.safetensors"), OID: strings.Repeat("2", 64), Size: 2}
+
+	got, err := filterPointers(root, []pointerFile{first, second}, []string{"model-00002.safetensors"})
+	if err != nil {
+		t.Fatalf("filterPointers() error = %v", err)
+	}
+	if len(got) != 1 || got[0].Path != second.Path {
+		t.Fatalf("filterPointers() = %#v, want second pointer", got)
+	}
+
+	got, err = filterPointers(root, []pointerFile{first, second}, []string{"weights/model-00001.safetensors"})
+	if err != nil {
+		t.Fatalf("filterPointers() exact error = %v", err)
+	}
+	if len(got) != 1 || got[0].Path != first.Path {
+		t.Fatalf("filterPointers() exact = %#v, want first pointer", got)
 	}
 }
 

@@ -574,6 +574,7 @@ func newModelCloneCmd() *cobra.Command {
 	var token string
 	var tokenStdin bool
 	var debugLFSBatch bool
+	var includeFiles []string
 
 	cmd := &cobra.Command{
 		Use:   "clone 作者/名称|ID|仓库URL",
@@ -639,20 +640,26 @@ func newModelCloneCmd() *cobra.Command {
 			if repoURL == "" {
 				return clierr.New(clierr.CodeRuntime, "模型仓库地址为空，无法克隆")
 			}
+			includeFiles = normalizeCloneIncludePaths(includeFiles)
 
 			targetDir, err := resolveCloneTarget(repoURL, modelName, into, dir)
 			if err != nil {
 				return clierr.New(clierr.CodeInvalidInput, "参数错误："+err.Error())
 			}
 			resumeMode := false
+			partialExistingDirMode := false
 			if stat, statErr := os.Stat(targetDir); statErr == nil {
 				if !stat.IsDir() {
 					return clierr.New(clierr.CodeInvalidInput, "目标路径已存在且不是目录："+targetDir)
 				}
 				if err := ensureResumableRepo(targetDir, repoURL); err != nil {
-					return clierr.New(clierr.CodeInvalidInput, err.Error())
+					if len(includeFiles) == 0 {
+						return clierr.New(clierr.CodeInvalidInput, err.Error())
+					}
+					partialExistingDirMode = true
+				} else {
+					resumeMode = true
 				}
-				resumeMode = true
 			} else if !os.IsNotExist(statErr) {
 				return clierr.New(clierr.CodeRuntime, "检查目标目录失败："+statErr.Error())
 			}
@@ -677,12 +684,24 @@ func newModelCloneCmd() *cobra.Command {
 				)
 			}
 
+			if partialExistingDirMode {
+				fmt.Printf("目标目录已存在且不是 Git 仓库，进入指定文件补全模式: %s\n", targetDir)
+				hydrated, copied, err := cloneSelectedFilesToExistingDir(cmd.Context(), repoURL, targetDir, includeFiles, gitlabToken, ctx, debugLFSBatch, cmd.OutOrStdout(), cmd.ErrOrStderr())
+				if err != nil {
+					ctx.Logger.Error("selected file clone failed", "error", err, "repo_url", repoURL, "target_dir", targetDir)
+					return clierr.New(clierr.CodeRuntime, "指定文件补全失败："+err.Error())
+				}
+				fmt.Printf("指定文件补全成功：复制 %d 个文件，补全 %d 个 LFS 文件\n", copied, hydrated)
+				fmt.Printf("本地路径: %s\n", targetDir)
+				return nil
+			}
+
 			if resumeMode {
 				fmt.Printf("目标目录已存在，进入断点续传模式: %s\n", targetDir)
 				if err := syncResumableRepo(cmd.Context(), targetDir, &githttp.BasicAuth{
 					Username: "oauth2",
 					Password: gitlabToken,
-				}, cmd.OutOrStdout()); err != nil {
+				}, includeFiles, cmd.OutOrStdout()); err != nil {
 					ctx.Logger.Error("sync existing repo failed", "error", err, "target_dir", targetDir)
 					return clierr.New(clierr.CodeRuntime, "补全普通 Git 文件失败："+err.Error())
 				}
@@ -700,7 +719,11 @@ func newModelCloneCmd() *cobra.Command {
 				}
 			}
 
-			fmt.Println("开始补全 Git LFS 大文件...")
+			if len(includeFiles) > 0 {
+				fmt.Printf("开始补全指定 Git LFS 文件: %s\n", strings.Join(includeFiles, ", "))
+			} else {
+				fmt.Println("开始补全 Git LFS 大文件...")
+			}
 			hydrated, err := gitlfs.Hydrate(cmd.Context(), gitlfs.HydrateOptions{
 				RepoDir:             targetDir,
 				RepoURL:             repoURL,
@@ -711,6 +734,7 @@ func newModelCloneCmd() *cobra.Command {
 				IdleTimeout:         ctx.Config.API.LFSIdleTimeout,
 				ChunkSize:           int64(ctx.Config.API.LFSChunkSizeMB) * 1024 * 1024,
 				DownloadURLOverride: ctx.Config.API.LFSDownloadURLOverride,
+				IncludePaths:        includeFiles,
 				ProgressOut:         cmd.OutOrStdout(),
 				DebugBatch:          debugLFSBatch,
 				DebugOut:            cmd.ErrOrStderr(),
@@ -736,6 +760,7 @@ func newModelCloneCmd() *cobra.Command {
 	cmd.Flags().StringVar(&token, "token", "", "explicit token for model detail, Git clone and LFS download; skips local login session lookup")
 	cmd.Flags().BoolVar(&tokenStdin, "token-stdin", false, "read explicit token from stdin instead of local login session")
 	cmd.Flags().BoolVar(&debugLFSBatch, "debug-lfs-batch", false, "print raw LFS Batch API response for debugging")
+	cmd.Flags().StringArrayVar(&includeFiles, "file", nil, "download only this repository-relative file; repeat for multiple files")
 	return cmd
 }
 
@@ -904,7 +929,189 @@ func sameRepoURL(a, b string) bool {
 	return normalize(a) == normalize(b)
 }
 
-func syncResumableRepo(ctx context.Context, targetDir string, auth *githttp.BasicAuth, out io.Writer) error {
+func normalizeCloneIncludePaths(paths []string) []string {
+	out := make([]string, 0, len(paths))
+	seen := make(map[string]struct{}, len(paths))
+	for _, raw := range paths {
+		path := strings.TrimSpace(raw)
+		if path == "" {
+			continue
+		}
+		if filepath.IsAbs(path) {
+			path = filepath.Base(path)
+		}
+		path = filepath.ToSlash(filepath.Clean(path))
+		path = strings.TrimPrefix(path, "./")
+		path = strings.TrimPrefix(path, "/")
+		if path == "" || path == "." {
+			continue
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		out = append(out, path)
+	}
+	return out
+}
+
+func clonePathMatches(rel string, includes []string) bool {
+	if len(includes) == 0 {
+		return true
+	}
+	rel = filepath.ToSlash(filepath.Clean(strings.TrimSpace(rel)))
+	rel = strings.TrimPrefix(rel, "./")
+	rel = strings.TrimPrefix(rel, "/")
+	for _, include := range includes {
+		if rel == include {
+			return true
+		}
+		if !strings.Contains(include, "/") && filepath.Base(rel) == include {
+			return true
+		}
+	}
+	return false
+}
+
+func cloneSelectedFilesToExistingDir(
+	ctx context.Context,
+	repoURL string,
+	targetDir string,
+	includeFiles []string,
+	gitlabToken string,
+	appCtx *app.Context,
+	debugLFSBatch bool,
+	out io.Writer,
+	errOut io.Writer,
+) (int, int, error) {
+	if len(includeFiles) == 0 {
+		return 0, 0, fmt.Errorf("at least one --file is required")
+	}
+	tmp, err := os.MkdirTemp("", "gomall-cli-selected-clone-*")
+	if err != nil {
+		return 0, 0, fmt.Errorf("create temp clone dir: %w", err)
+	}
+	defer os.RemoveAll(tmp)
+
+	repoDir := filepath.Join(tmp, "repo")
+	if out != nil {
+		fmt.Fprintf(out, "临时克隆仓库元数据: %s\n", repoURL)
+	}
+	_, err = gogit.PlainCloneContext(ctx, repoDir, false, &gogit.CloneOptions{
+		URL:      repoURL,
+		Auth:     &githttp.BasicAuth{Username: "oauth2", Password: gitlabToken},
+		Progress: out,
+	})
+	if err != nil {
+		return 0, 0, fmt.Errorf("clone temp repo: %w", err)
+	}
+
+	if out != nil {
+		fmt.Fprintf(out, "开始补全指定 Git LFS 文件: %s\n", strings.Join(includeFiles, ", "))
+	}
+	hydrated, err := gitlfs.Hydrate(ctx, gitlfs.HydrateOptions{
+		RepoDir:             repoDir,
+		RepoURL:             repoURL,
+		Token:               gitlabToken,
+		UserAgent:           appCtx.Config.API.UserAgent,
+		Insecure:            appCtx.Config.API.Insecure,
+		HTTPTimeout:         appCtx.Config.API.LFSTimeout,
+		IdleTimeout:         appCtx.Config.API.LFSIdleTimeout,
+		ChunkSize:           int64(appCtx.Config.API.LFSChunkSizeMB) * 1024 * 1024,
+		DownloadURLOverride: appCtx.Config.API.LFSDownloadURLOverride,
+		IncludePaths:        includeFiles,
+		ProgressOut:         out,
+		DebugBatch:          debugLFSBatch,
+		DebugOut:            errOut,
+	})
+	if err != nil {
+		return hydrated, 0, err
+	}
+
+	copied, err := copySelectedFiles(repoDir, targetDir, includeFiles)
+	if err != nil {
+		return hydrated, copied, err
+	}
+	return hydrated, copied, nil
+}
+
+func copySelectedFiles(srcRoot, dstRoot string, includeFiles []string) (int, error) {
+	copied := 0
+	err := filepath.WalkDir(srcRoot, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			name := d.Name()
+			if name == ".git" || name == ".gomall-cli-lfs" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		rel, err := filepath.Rel(srcRoot, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		if !clonePathMatches(rel, includeFiles) {
+			return nil
+		}
+		if err := copyOneFile(path, filepath.Join(dstRoot, filepath.FromSlash(rel))); err != nil {
+			return err
+		}
+		copied++
+		return nil
+	})
+	if err != nil {
+		return copied, fmt.Errorf("copy selected files: %w", err)
+	}
+	if copied == 0 {
+		return 0, fmt.Errorf("no files matched --file: %s", strings.Join(includeFiles, ", "))
+	}
+	return copied, nil
+}
+
+func copyOneFile(src, dst string) error {
+	info, err := os.Lstat(src)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		target, err := os.Readlink(src)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return err
+		}
+		_ = os.Remove(dst)
+		return os.Symlink(target, dst)
+	}
+
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode().Perm())
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(out, in)
+	closeErr := out.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return os.Chmod(dst, info.Mode().Perm())
+}
+
+func syncResumableRepo(ctx context.Context, targetDir string, auth *githttp.BasicAuth, includeFiles []string, out io.Writer) error {
 	repo, err := gogit.PlainOpen(targetDir)
 	if err != nil {
 		return fmt.Errorf("open repo: %w", err)
@@ -937,7 +1144,7 @@ func syncResumableRepo(ctx context.Context, targetDir string, auth *githttp.Basi
 	if err != nil {
 		return fmt.Errorf("load head tree: %w", err)
 	}
-	restored, err := restoreMissingTrackedFiles(targetDir, tree)
+	restored, err := restoreMissingTrackedFiles(targetDir, tree, includeFiles)
 	if err != nil {
 		return fmt.Errorf("restore missing tracked files: %w", err)
 	}
@@ -948,13 +1155,16 @@ func syncResumableRepo(ctx context.Context, targetDir string, auth *githttp.Basi
 	return nil
 }
 
-func restoreMissingTrackedFiles(repoDir string, tree *object.Tree) (int, error) {
+func restoreMissingTrackedFiles(repoDir string, tree *object.Tree, includeFiles []string) (int, error) {
 	if tree == nil {
 		return 0, fmt.Errorf("nil tree")
 	}
 	restored := 0
 	err := tree.Files().ForEach(func(f *object.File) error {
 		if f == nil {
+			return nil
+		}
+		if !clonePathMatches(f.Name, includeFiles) {
 			return nil
 		}
 		absPath := filepath.Join(repoDir, filepath.FromSlash(f.Name))

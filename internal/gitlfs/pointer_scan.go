@@ -52,6 +52,63 @@ func collectPointers(root string) ([]pointerFile, error) {
 	return out, nil
 }
 
+func filterPointers(root string, pointers []pointerFile, includes []string) ([]pointerFile, error) {
+	matchers := normalizeIncludePaths(includes)
+	if len(matchers) == 0 {
+		return pointers, nil
+	}
+
+	out := make([]pointerFile, 0, len(pointers))
+	for _, pointer := range pointers {
+		rel, err := filepath.Rel(root, pointer.Path)
+		if err != nil {
+			return nil, err
+		}
+		if pathMatchesAny(filepath.ToSlash(rel), matchers) {
+			out = append(out, pointer)
+		}
+	}
+	return out, nil
+}
+
+func normalizeIncludePaths(paths []string) []string {
+	out := make([]string, 0, len(paths))
+	seen := make(map[string]struct{}, len(paths))
+	for _, raw := range paths {
+		path := strings.TrimSpace(raw)
+		if path == "" {
+			continue
+		}
+		path = filepath.ToSlash(filepath.Clean(path))
+		path = strings.TrimPrefix(path, "./")
+		path = strings.TrimPrefix(path, "/")
+		if path == "." || path == "" {
+			continue
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		out = append(out, path)
+	}
+	return out
+}
+
+func pathMatchesAny(rel string, includes []string) bool {
+	rel = filepath.ToSlash(filepath.Clean(strings.TrimSpace(rel)))
+	rel = strings.TrimPrefix(rel, "./")
+	rel = strings.TrimPrefix(rel, "/")
+	for _, include := range includes {
+		if rel == include {
+			return true
+		}
+		if !strings.Contains(include, "/") && filepath.Base(rel) == include {
+			return true
+		}
+	}
+	return false
+}
+
 func parsePointer(raw []byte) (string, int64, bool) {
 	content := strings.ReplaceAll(string(raw), "\r\n", "\n")
 	lines := strings.Split(content, "\n")

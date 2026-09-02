@@ -59,6 +59,11 @@ go run . model upload ./demomodel --visibility 5 --large-file-threshold-mb 10
 go run . model upload ./demomodel --model 2546
 go run . model upload ./demomodel --model gomall/demomodel
 
+# create/reuse model through synchronization/model, then upload files
+./scripts/sync_model_upload.sh --username <username> ./demomodel
+./scripts/sync_model_upload.sh --username <username> --visibility 5 --delete-existing ./demomodel
+gomall-sync-model-upload --username <username> ./demomodel
+
 # delete model by id (requires login first)
 go run . model delete 2546
 
@@ -70,6 +75,7 @@ go run . model detail gomall/test1 --show-readme
 go run . model clone gomall/test1
 go run . model clone gomall/test1 --into ./downloads
 go run . model clone 1700
+go run . model clone gomall/test1 --dir ./downloads/test1 --file model-00001-of-00015.safetensors
 
 # clone with an explicit token, without reading local login session
 go run . model clone gomall/test1 --token '<token>'
@@ -81,7 +87,10 @@ After login, CLI stores `token / expireTime / username / gitlabToken / gitlabId`
 `gitlabToken` is fetched from `/goMallApi/api/users/get_current_user` right after login, and `model clone` uses it for Git authentication.
 When `model clone --token` or `model clone --token-stdin` is used, CLI uses that token for model detail lookup, Git authentication, and Git LFS hydration, and skips reading local session. Passing a repository URL as the clone target skips model detail lookup entirely.
 After clone, CLI will automatically hydrate Git LFS pointer files with concurrent download + retry (exponential backoff), and show real-time progress (speed / remaining / ETA). If server supports HTTP Range, large files are downloaded in parallel chunks.
+Use `model clone --file <repo-relative-path>` to download only selected files. The flag can be repeated, and a bare filename matches by basename, which is useful for filling a single missing shard in an existing model directory.
 Model upload uses pure Go Git/LFS implementations and does not require local `git` or `git-lfs` commands.
+The synchronization upload script posts multipart form data to `/synchronization/model` with the required `upload-user-agent` header, reads `user_token` from the response header, and uses that token for Git/LFS upload.
+Its default API base URL is `http://10.60.1.140:30591/goMallApi/api`, so the default synchronization endpoint is `http://10.60.1.140:30591/goMallApi/api/synchronization/model`. Override it with `--api-base-url` or `GOMALL_API_BASE_URL` when needed.
 Session file is encrypted with AES-256-GCM.
 Session key is always machine-derived.
 Machine-derived secret supports macOS / Linux / Windows.

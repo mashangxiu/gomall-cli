@@ -40,6 +40,10 @@ func Hydrate(ctx context.Context, opts HydrateOptions) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	pointers, err = filterPointers(repoDir, pointers, opts.IncludePaths)
+	if err != nil {
+		return 0, err
+	}
 	if len(pointers) == 0 {
 		return 0, nil
 	}
