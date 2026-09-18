@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 func replacePointerFile(src, dst string, mode fs.FileMode) error {
@@ -70,6 +71,10 @@ func resumeOffset(partPath string, wantSize int64) int64 {
 }
 
 func fileSHA256(path string) (string, error) {
+	return fileSHA256WithProgress(path, "", 0, nil)
+}
+
+func fileSHA256WithProgress(path, label string, size int64, progress *progressReporter) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
@@ -77,8 +82,27 @@ func fileSHA256(path string) (string, error) {
 	defer f.Close()
 
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
+	buf := make([]byte, 4*1024*1024)
+	var read int64
+	lastLog := time.Now()
+	for {
+		n, readErr := f.Read(buf)
+		if n > 0 {
+			if _, err := h.Write(buf[:n]); err != nil {
+				return "", err
+			}
+			read += int64(n)
+			if progress != nil && strings.TrimSpace(label) != "" && time.Since(lastLog) >= 3*time.Second {
+				progress.logInfo("Git LFS: 本地校验中: %s（%s / %s）", label, formatBytes(read), formatBytes(size))
+				lastLog = time.Now()
+			}
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return "", readErr
+		}
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }

@@ -23,6 +23,7 @@ func downloadObjectMultipart(
 	token, userAgent string,
 	idleTimeout time.Duration,
 	chunkSize int64,
+	label string,
 	progress *progressReporter,
 ) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(partPath), 0o755); err != nil {
@@ -106,7 +107,7 @@ func downloadObjectMultipart(
 	}
 
 	if alreadyDoneBytes == wantSize {
-		gotOID, hashErr := fileSHA256(partPath)
+		gotOID, hashErr := fileSHA256WithProgress(partPath, label, wantSize, progress)
 		if hashErr == nil && strings.EqualFold(gotOID, wantOID) {
 			_ = os.Remove(statePath)
 			return partPath, nil
@@ -197,7 +198,7 @@ loop:
 		return "", err
 	}
 
-	gotOID, hashErr := fileSHA256(partPath)
+	gotOID, hashErr := fileSHA256WithProgress(partPath, label, wantSize, progress)
 	if hashErr != nil {
 		return "", fmt.Errorf("hash lfs object oid=%s: %w", wantOID, hashErr)
 	}
