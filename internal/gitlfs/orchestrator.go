@@ -3,6 +3,7 @@ package gitlfs
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"sync"
@@ -14,9 +15,13 @@ func runConcurrentDownloads(
 	ctx context.Context,
 	client *http.Client,
 	tasks []lfsDownloadTask,
+	batchURL string,
 	token, userAgent string,
 	idleTimeout time.Duration,
 	chunkSize int64,
+	downloadURLOverride string,
+	debugBatch bool,
+	debugOut io.Writer,
 	progress *progressReporter,
 	downloadCache map[string]string,
 ) error {
@@ -53,10 +58,14 @@ func runConcurrentDownloads(
 				task.oid,
 				task.size,
 				task.part,
+				batchURL,
 				token,
 				userAgent,
 				idleTimeout,
 				chunkSize,
+				downloadURLOverride,
+				debugBatch,
+				debugOut,
 				task.label,
 				progress,
 			)
@@ -111,9 +120,13 @@ func downloadObjectWithRetry(
 	wantOID string,
 	wantSize int64,
 	partPath string,
+	batchURL string,
 	token, userAgent string,
 	idleTimeout time.Duration,
 	chunkSize int64,
+	downloadURLOverride string,
+	debugBatch bool,
+	debugOut io.Writer,
 	label string,
 	progress *progressReporter,
 ) (string, error) {
@@ -128,6 +141,17 @@ func downloadObjectWithRetry(
 		lastErr = err
 		if isHashMismatchError(err) {
 			_ = os.Remove(partPath)
+		}
+		if isExpiredDownloadActionError(err) {
+			refreshed, refreshErr := refreshDownloadAction(ctx, client, batchURL, token, userAgent, wantOID, wantSize, downloadURLOverride, debugBatch, debugOut)
+			if refreshErr != nil {
+				lastErr = fmt.Errorf("%w; refresh download url: %v", err, refreshErr)
+			} else {
+				action = refreshed
+				if progress != nil {
+					progress.logInfo("LFS下载链接已刷新: %s", label)
+				}
+			}
 		}
 
 		if ctx.Err() != nil {
@@ -158,4 +182,45 @@ func downloadObjectWithRetry(
 		return "", fmt.Errorf("download lfs object oid=%s canceled: %w", wantOID, ctxErr)
 	}
 	return "", fmt.Errorf("download lfs object oid=%s failed after %d attempts: %w", wantOID, lfsMaxRetries, lastErr)
+}
+
+func refreshDownloadAction(
+	ctx context.Context,
+	client *http.Client,
+	batchURL string,
+	token, userAgent string,
+	oid string,
+	size int64,
+	downloadURLOverride string,
+	debugBatch bool,
+	debugOut io.Writer,
+) (batchAction, error) {
+	respMap, err := requestBatch(
+		ctx,
+		client,
+		batchURL,
+		userAgent,
+		token,
+		[]batchRequestObject{{OID: oid, Size: size}},
+		debugBatch,
+		debugOut,
+	)
+	if err != nil {
+		return batchAction{}, err
+	}
+	if err := applyDownloadURLOverride(respMap, downloadURLOverride, debugBatch, debugOut); err != nil {
+		return batchAction{}, err
+	}
+	obj, ok := respMap[oid]
+	if !ok {
+		return batchAction{}, fmt.Errorf("lfs batch response missing object: %s", oid)
+	}
+	if obj.Error != nil {
+		return batchAction{}, fmt.Errorf("lfs batch object error oid=%s code=%d message=%s", oid, obj.Error.Code, obj.Error.Message)
+	}
+	action, ok := obj.Actions[batchOpDownload]
+	if !ok || action.Href == "" {
+		return batchAction{}, fmt.Errorf("lfs download action missing for oid=%s", oid)
+	}
+	return action, nil
 }

@@ -101,10 +101,6 @@ func downloadObjectMultipart(
 		}
 	}
 
-	if progress != nil && alreadyDoneBytes > 0 {
-		progress.add(alreadyDoneBytes)
-	}
-
 	if len(chunks) == 0 {
 		return partPath, nil
 	}
@@ -234,6 +230,9 @@ func downloadChunkWithRetry(
 			return nil
 		} else {
 			lastErr = err
+			if isExpiredDownloadActionError(err) {
+				return err
+			}
 		}
 		if ctx.Err() != nil || attempt == lfsMaxRetries {
 			break

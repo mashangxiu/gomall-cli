@@ -140,3 +140,18 @@ func (p *progressReporter) logLocalHit(label string) {
 		_ = p.bar.Set64(p.current.Load())
 	}
 }
+
+func (p *progressReporter) logInfo(format string, args ...any) {
+	if p.out == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.bar != nil {
+		_ = p.bar.Clear()
+	}
+	_, _ = fmt.Fprintf(p.out, format+"\n", args...)
+	if p.bar != nil {
+		_ = p.bar.Set64(p.current.Load())
+	}
+}
