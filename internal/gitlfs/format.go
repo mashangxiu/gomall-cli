@@ -66,6 +66,9 @@ func classifyRetryReason(err error) string {
 	case strings.Contains(msg, "http status 401"):
 		return "http 401 unauthorized"
 	case strings.Contains(msg, "http status 403"):
+		if isExpiredDownloadActionError(err) {
+			return "download url expired"
+		}
 		return "http 403 forbidden"
 	case strings.Contains(msg, "http status 404"):
 		return "http 404 not found"
@@ -78,4 +81,17 @@ func classifyRetryReason(err error) string {
 	default:
 		return strings.TrimSpace(err.Error())
 	}
+}
+
+func isExpiredDownloadActionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if !strings.Contains(msg, "403") {
+		return false
+	}
+	return strings.Contains(msg, "request has expired") ||
+		strings.Contains(msg, "accessdenied") ||
+		strings.Contains(msg, "access denied")
 }

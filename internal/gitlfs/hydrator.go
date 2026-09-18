@@ -111,21 +111,21 @@ func Hydrate(ctx context.Context, opts HydrateOptions) (int, error) {
 			return 0, fmt.Errorf("lfs download action missing for oid=%s", oid)
 		}
 		partPath := partFilePath(resumeDir, oid)
-		// If local part is already full-sized, verify hash first so progress is accurate.
 		offset := resumeOffset(partPath, files[0].Size)
 		if files[0].Size > 0 && offset == files[0].Size {
-			gotOID, hashErr := fileSHA256(partPath)
-			if hashErr == nil && strings.EqualFold(gotOID, oid) {
-				downloadCache[oid] = partPath
-				resumedBytes += offset
-				localHitCount++
-				continue
-			}
 			if doneBytes, ok := multipartDoneBytes(partPath, files[0].Size); ok && doneBytes > 0 {
 				offset = doneBytes
 			} else {
+				// Multipart downloads preallocate the part file to full size.
+				// Only hash full-sized files when there is no multipart state.
+				gotOID, hashErr := fileSHA256(partPath)
+				if hashErr == nil && strings.EqualFold(gotOID, oid) {
+					downloadCache[oid] = partPath
+					resumedBytes += offset
+					localHitCount++
+					continue
+				}
 				_ = os.Remove(partPath)
-				_ = os.Remove(multipartStatePath(partPath))
 				offset = 0
 			}
 		}
@@ -155,7 +155,7 @@ func Hydrate(ctx context.Context, opts HydrateOptions) (int, error) {
 	progress.start()
 	defer progress.finish()
 
-	if err := runConcurrentDownloads(ctx, client, tasks, token, opts.UserAgent, idleTimeout, chunkSize, progress, downloadCache); err != nil {
+	if err := runConcurrentDownloads(ctx, client, tasks, batchURL, token, opts.UserAgent, idleTimeout, chunkSize, opts.DownloadURLOverride, opts.DebugBatch, opts.DebugOut, progress, downloadCache); err != nil {
 		return 0, err
 	}
 

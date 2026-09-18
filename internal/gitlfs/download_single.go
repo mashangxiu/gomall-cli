@@ -28,21 +28,20 @@ func downloadObject(
 ) (string, error) {
 	offset := resumeOffset(partPath, wantSize)
 	if wantSize > 0 && offset == wantSize {
-		gotOID, err := fileSHA256(partPath)
-		if err == nil && strings.EqualFold(gotOID, wantOID) {
-			if progress != nil {
-				progress.logLocalHit(label)
-			}
-			return partPath, nil
-		}
-		if doneBytes, ok := multipartDoneBytes(partPath, wantSize); ok {
-			if progress != nil && offset > doneBytes {
-				progress.add(-(offset - doneBytes))
-			}
+		if _, ok := multipartDoneBytes(partPath, wantSize); ok {
+			// Let downloadObjectMultipart reload the chunk state and resume
+			// unfinished chunks. The preallocated file size is not a single
+			// contiguous offset.
 			offset = 0
 		} else {
-			if progress != nil && offset > 0 {
-				progress.add(-offset)
+			// Multipart downloads preallocate the part file to full size.
+			// Only hash full-sized files when there is no multipart state.
+			gotOID, err := fileSHA256(partPath)
+			if err == nil && strings.EqualFold(gotOID, wantOID) {
+				if progress != nil {
+					progress.logLocalHit(label)
+				}
+				return partPath, nil
 			}
 			_ = os.Remove(partPath)
 			_ = os.Remove(multipartStatePath(partPath))
