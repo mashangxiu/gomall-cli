@@ -142,6 +142,13 @@ func Hydrate(ctx context.Context, opts HydrateOptions) (int, error) {
 			} else {
 				// Multipart downloads preallocate the part file to full size.
 				// Only hash full-sized files when there is no multipart state.
+				if opts.TrustResumeCache {
+					logf("Git LFS: 信任本地完整断点，跳过校验: %s（%s）", label, formatBytes(files[0].Size))
+					downloadCache[oid] = partPath
+					resumedBytes += offset
+					localHitCount++
+					continue
+				}
 				logf("Git LFS: 校验本地完整断点: %s（%s）", label, formatBytes(files[0].Size))
 				gotOID, hashErr := fileSHA256WithProgress(partPath, label, files[0].Size, progress)
 				if hashErr == nil && strings.EqualFold(gotOID, oid) {
@@ -163,6 +170,7 @@ func Hydrate(ctx context.Context, opts HydrateOptions) (int, error) {
 			action: action,
 			label:  label,
 			part:   partPath,
+			trust:  opts.TrustResumeCache,
 		})
 		resumedBytes += offset
 	}

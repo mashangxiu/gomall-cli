@@ -71,6 +71,7 @@ go run . model clone gomall/test1
 go run . model clone gomall/test1 --into ./downloads
 go run . model clone 1700
 go run . model clone gomall/test1 --dir ./downloads/test1 --file model-00001-of-00015.safetensors
+go run . model clone gomall/test1 --trust-lfs-resume-cache
 
 # clone with an explicit token, without reading local login session
 go run . model clone gomall/test1 --token '<token>'
@@ -83,6 +84,7 @@ After login, CLI stores `token / expireTime / username / gitlabToken / gitlabId`
 When `model clone --token` or `model clone --token-stdin` is used, CLI uses that token for model detail lookup, Git authentication, and Git LFS hydration, and skips reading local session. Passing a repository URL as the clone target skips model detail lookup entirely.
 After clone, CLI will automatically hydrate Git LFS pointer files with concurrent download + retry (exponential backoff), and show real-time progress (speed / remaining / ETA). If server supports HTTP Range, large files are downloaded in parallel chunks.
 Use `model clone --file <repo-relative-path>` to download only selected files. The flag can be repeated, and a bare filename matches by basename, which is useful for filling a single missing shard in an existing model directory.
+Use `model clone --trust-lfs-resume-cache` to skip SHA256 verification for complete local LFS resume cache files during resume. This is faster for large interrupted downloads, but only use it when you trust the existing local cache.
 Model upload uses pure Go Git/LFS implementations and does not require local `git` or `git-lfs` commands.
 Session file is encrypted with AES-256-GCM.
 Session key is always machine-derived.

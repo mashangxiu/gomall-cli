@@ -24,6 +24,7 @@ func downloadObject(
 	idleTimeout time.Duration,
 	chunkSize int64,
 	label string,
+	trustResumeCache bool,
 	progress *progressReporter,
 ) (string, error) {
 	offset := resumeOffset(partPath, wantSize)
@@ -36,6 +37,13 @@ func downloadObject(
 		} else {
 			// Multipart downloads preallocate the part file to full size.
 			// Only hash full-sized files when there is no multipart state.
+			if trustResumeCache {
+				if progress != nil {
+					progress.logInfo("Git LFS: 信任本地完整断点，跳过校验: %s（%s）", label, formatBytes(wantSize))
+					progress.logLocalHit(label)
+				}
+				return partPath, nil
+			}
 			gotOID, err := fileSHA256WithProgress(partPath, label, wantSize, progress)
 			if err == nil && strings.EqualFold(gotOID, wantOID) {
 				if progress != nil {
