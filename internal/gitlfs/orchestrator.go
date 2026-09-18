@@ -67,6 +67,7 @@ func runConcurrentDownloads(
 				debugBatch,
 				debugOut,
 				task.label,
+				task.trust,
 				progress,
 			)
 			if err != nil {
@@ -128,13 +129,14 @@ func downloadObjectWithRetry(
 	debugBatch bool,
 	debugOut io.Writer,
 	label string,
+	trustResumeCache bool,
 	progress *progressReporter,
 ) (string, error) {
 	var lastErr error
 	backoff := lfsBackoffBase
 
 	for attempt := 1; attempt <= lfsMaxRetries; attempt++ {
-		tmpPath, err := downloadObject(ctx, client, action, wantOID, wantSize, partPath, token, userAgent, idleTimeout, chunkSize, label, progress)
+		tmpPath, err := downloadObject(ctx, client, action, wantOID, wantSize, partPath, token, userAgent, idleTimeout, chunkSize, label, trustResumeCache, progress)
 		if err == nil {
 			return tmpPath, nil
 		}

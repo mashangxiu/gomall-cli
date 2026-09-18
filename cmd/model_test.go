@@ -142,6 +142,9 @@ func TestCloneTokenFlagsExist(t *testing.T) {
 	if cmd.Flags().Lookup("file") == nil {
 		t.Fatalf("clone command should expose --file")
 	}
+	if cmd.Flags().Lookup("trust-lfs-resume-cache") == nil {
+		t.Fatalf("clone command should expose --trust-lfs-resume-cache")
+	}
 }
 
 func TestReadTokenFromStdin(t *testing.T) {

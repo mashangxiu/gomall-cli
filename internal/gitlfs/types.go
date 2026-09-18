@@ -29,6 +29,7 @@ type HydrateOptions struct {
 	IdleTimeout         time.Duration
 	ChunkSize           int64
 	DownloadURLOverride string
+	TrustResumeCache    bool
 	IncludePaths        []string
 	ProgressOut         io.Writer
 	DebugBatch          bool
@@ -81,6 +82,7 @@ type lfsDownloadTask struct {
 	action batchAction
 	label  string
 	part   string
+	trust  bool
 }
 
 type rangeChunk struct {

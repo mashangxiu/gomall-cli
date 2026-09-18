@@ -574,6 +574,7 @@ func newModelCloneCmd() *cobra.Command {
 	var token string
 	var tokenStdin bool
 	var debugLFSBatch bool
+	var trustLFSResumeCache bool
 	var includeFiles []string
 
 	cmd := &cobra.Command{
@@ -686,7 +687,7 @@ func newModelCloneCmd() *cobra.Command {
 
 			if partialExistingDirMode {
 				fmt.Printf("目标目录已存在且不是 Git 仓库，进入指定文件补全模式: %s\n", targetDir)
-				hydrated, copied, err := cloneSelectedFilesToExistingDir(cmd.Context(), repoURL, targetDir, includeFiles, gitlabToken, ctx, debugLFSBatch, cmd.OutOrStdout(), cmd.ErrOrStderr())
+				hydrated, copied, err := cloneSelectedFilesToExistingDir(cmd.Context(), repoURL, targetDir, includeFiles, gitlabToken, ctx, debugLFSBatch, trustLFSResumeCache, cmd.OutOrStdout(), cmd.ErrOrStderr())
 				if err != nil {
 					ctx.Logger.Error("selected file clone failed", "error", err, "repo_url", repoURL, "target_dir", targetDir)
 					return clierr.New(clierr.CodeRuntime, "指定文件补全失败："+err.Error())
@@ -734,6 +735,7 @@ func newModelCloneCmd() *cobra.Command {
 				IdleTimeout:         ctx.Config.API.LFSIdleTimeout,
 				ChunkSize:           int64(ctx.Config.API.LFSChunkSizeMB) * 1024 * 1024,
 				DownloadURLOverride: ctx.Config.API.LFSDownloadURLOverride,
+				TrustResumeCache:    trustLFSResumeCache,
 				IncludePaths:        includeFiles,
 				ProgressOut:         cmd.OutOrStdout(),
 				DebugBatch:          debugLFSBatch,
@@ -760,6 +762,7 @@ func newModelCloneCmd() *cobra.Command {
 	cmd.Flags().StringVar(&token, "token", "", "explicit token for model detail, Git clone and LFS download; skips local login session lookup")
 	cmd.Flags().BoolVar(&tokenStdin, "token-stdin", false, "read explicit token from stdin instead of local login session")
 	cmd.Flags().BoolVar(&debugLFSBatch, "debug-lfs-batch", false, "print raw LFS Batch API response for debugging")
+	cmd.Flags().BoolVar(&trustLFSResumeCache, "trust-lfs-resume-cache", false, "skip SHA256 verification for complete local LFS resume cache files")
 	cmd.Flags().StringArrayVar(&includeFiles, "file", nil, "download only this repository-relative file; repeat for multiple files")
 	return cmd
 }
@@ -981,6 +984,7 @@ func cloneSelectedFilesToExistingDir(
 	gitlabToken string,
 	appCtx *app.Context,
 	debugLFSBatch bool,
+	trustLFSResumeCache bool,
 	out io.Writer,
 	errOut io.Writer,
 ) (int, int, error) {
@@ -1019,6 +1023,7 @@ func cloneSelectedFilesToExistingDir(
 		IdleTimeout:         appCtx.Config.API.LFSIdleTimeout,
 		ChunkSize:           int64(appCtx.Config.API.LFSChunkSizeMB) * 1024 * 1024,
 		DownloadURLOverride: appCtx.Config.API.LFSDownloadURLOverride,
+		TrustResumeCache:    trustLFSResumeCache,
 		IncludePaths:        includeFiles,
 		ProgressOut:         out,
 		DebugBatch:          debugLFSBatch,
