@@ -10,6 +10,13 @@ import (
 )
 
 func Hydrate(ctx context.Context, opts HydrateOptions) (int, error) {
+	logf := func(format string, args ...any) {
+		if opts.ProgressOut == nil {
+			return
+		}
+		_, _ = fmt.Fprintf(opts.ProgressOut, format+"\n", args...)
+	}
+
 	repoDir := strings.TrimSpace(opts.RepoDir)
 	repoURL := strings.TrimSpace(opts.RepoURL)
 	token := strings.TrimSpace(opts.Token)
@@ -36,16 +43,28 @@ func Hydrate(ctx context.Context, opts HydrateOptions) (int, error) {
 		chunkSize = lfsChunkSize
 	}
 
+	logf("Git LFS: 正在扫描 pointer 文件...")
 	pointers, err := collectPointers(repoDir)
 	if err != nil {
 		return 0, err
 	}
+	allPointerCount := len(pointers)
 	pointers, err = filterPointers(repoDir, pointers, opts.IncludePaths)
 	if err != nil {
 		return 0, err
 	}
 	if len(pointers) == 0 {
+		if len(opts.IncludePaths) > 0 {
+			logf("Git LFS: 未找到匹配指定文件的 pointer（扫描 %d 个 pointer）", allPointerCount)
+		} else {
+			logf("Git LFS: 未发现 pointer 文件")
+		}
 		return 0, nil
+	}
+	if len(opts.IncludePaths) > 0 {
+		logf("Git LFS: pointer 扫描完成，匹配 %d/%d 个", len(pointers), allPointerCount)
+	} else {
+		logf("Git LFS: pointer 扫描完成，发现 %d 个", len(pointers))
 	}
 
 	batchURL, err := buildBatchURL(repoURL)
@@ -76,6 +95,7 @@ func Hydrate(ctx context.Context, opts HydrateOptions) (int, error) {
 		})
 	}
 
+	logf("Git LFS: 请求 Batch 下载链接（唯一对象: %d，总大小: %s）...", len(reqObjects), formatBytes(totalBytes))
 	respMap, err := requestBatch(
 		ctx,
 		client,
@@ -89,6 +109,7 @@ func Hydrate(ctx context.Context, opts HydrateOptions) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	logf("Git LFS: Batch 下载链接获取完成")
 	if err := applyDownloadURLOverride(respMap, opts.DownloadURLOverride, opts.DebugBatch, opts.DebugOut); err != nil {
 		return 0, err
 	}
@@ -98,6 +119,7 @@ func Hydrate(ctx context.Context, opts HydrateOptions) (int, error) {
 	tasks := make([]lfsDownloadTask, 0, len(grouped))
 	var resumedBytes int64
 	var localHitCount int
+	logf("Git LFS: 正在检查本地断点状态...")
 	for oid, files := range grouped {
 		obj, ok := respMap[oid]
 		if !ok {
@@ -110,21 +132,26 @@ func Hydrate(ctx context.Context, opts HydrateOptions) (int, error) {
 		if !ok || strings.TrimSpace(action.Href) == "" {
 			return 0, fmt.Errorf("lfs download action missing for oid=%s", oid)
 		}
+		label := buildTaskLabel(repoDir, files)
 		partPath := partFilePath(resumeDir, oid)
 		offset := resumeOffset(partPath, files[0].Size)
 		if files[0].Size > 0 && offset == files[0].Size {
 			if doneBytes, ok := multipartDoneBytes(partPath, files[0].Size); ok && doneBytes > 0 {
+				logf("Git LFS: 发现分块断点: %s（已完成: %s / %s）", label, formatBytes(doneBytes), formatBytes(files[0].Size))
 				offset = doneBytes
 			} else {
 				// Multipart downloads preallocate the part file to full size.
 				// Only hash full-sized files when there is no multipart state.
-				gotOID, hashErr := fileSHA256(partPath)
+				logf("Git LFS: 校验本地完整断点: %s（%s）", label, formatBytes(files[0].Size))
+				gotOID, hashErr := fileSHA256WithProgress(partPath, label, files[0].Size, progress)
 				if hashErr == nil && strings.EqualFold(gotOID, oid) {
 					downloadCache[oid] = partPath
 					resumedBytes += offset
 					localHitCount++
+					logf("Git LFS: 本地断点校验通过: %s", label)
 					continue
 				}
+				logf("Git LFS: 本地断点校验失败，重新下载: %s", label)
 				_ = os.Remove(partPath)
 				offset = 0
 			}
@@ -134,11 +161,12 @@ func Hydrate(ctx context.Context, opts HydrateOptions) (int, error) {
 			oid:    oid,
 			size:   files[0].Size,
 			action: action,
-			label:  buildTaskLabel(repoDir, files),
+			label:  label,
 			part:   partPath,
 		})
 		resumedBytes += offset
 	}
+	logf("Git LFS: 本地断点检查完成")
 	progress.add(resumedBytes)
 
 	if opts.ProgressOut != nil {
@@ -155,10 +183,12 @@ func Hydrate(ctx context.Context, opts HydrateOptions) (int, error) {
 	progress.start()
 	defer progress.finish()
 
+	logf("Git LFS: 开始下载任务（待下载对象: %d）", len(tasks))
 	if err := runConcurrentDownloads(ctx, client, tasks, batchURL, token, opts.UserAgent, idleTimeout, chunkSize, opts.DownloadURLOverride, opts.DebugBatch, opts.DebugOut, progress, downloadCache); err != nil {
 		return 0, err
 	}
 
+	logf("Git LFS: 正在替换 pointer 文件...")
 	var hydrated int
 	for oid, files := range grouped {
 		tmpPath, ok := downloadCache[oid]
@@ -174,5 +204,6 @@ func Hydrate(ctx context.Context, opts HydrateOptions) (int, error) {
 		_ = os.Remove(tmpPath)
 	}
 
+	logf("Git LFS: pointer 文件替换完成")
 	return hydrated, nil
 }

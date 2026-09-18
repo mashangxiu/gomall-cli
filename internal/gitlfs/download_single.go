@@ -36,7 +36,7 @@ func downloadObject(
 		} else {
 			// Multipart downloads preallocate the part file to full size.
 			// Only hash full-sized files when there is no multipart state.
-			gotOID, err := fileSHA256(partPath)
+			gotOID, err := fileSHA256WithProgress(partPath, label, wantSize, progress)
 			if err == nil && strings.EqualFold(gotOID, wantOID) {
 				if progress != nil {
 					progress.logLocalHit(label)
@@ -53,7 +53,7 @@ func downloadObject(
 			if progress != nil {
 				progress.logDownloading(label + "（分块并发）")
 			}
-			return downloadObjectMultipart(ctx, client, action, wantOID, wantSize, partPath, token, userAgent, idleTimeout, chunkSize, progress)
+			return downloadObjectMultipart(ctx, client, action, wantOID, wantSize, partPath, token, userAgent, idleTimeout, chunkSize, label, progress)
 		}
 	}
 	if progress != nil {
@@ -185,7 +185,7 @@ func downloadObject(
 		return "", fmt.Errorf("lfs object size mismatch oid=%s want=%d got=%d", wantOID, wantSize, fullSize)
 	}
 
-	gotOID, hashErr := fileSHA256(partPath)
+	gotOID, hashErr := fileSHA256WithProgress(partPath, label, wantSize, progress)
 	if hashErr != nil {
 		return "", fmt.Errorf("hash lfs object oid=%s: %w", wantOID, hashErr)
 	}
